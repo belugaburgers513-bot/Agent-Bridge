@@ -21,7 +21,7 @@ const parallelTools = require('./tools/parallel_tools');
 const installer = require('./installer');
 const { getTerminalSession } = require('./tools/terminal_session');
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const STARTED_AT = new Date().toISOString();
 
 process.on('uncaughtException', (err) => console.error('[Server Error] Uncaught:', err));

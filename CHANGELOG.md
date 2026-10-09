@@ -1,5 +1,21 @@
 # Changelog
 
+## OrbitBridge v1.8.1 (2026-10-10)
+
+Mobile keyboard fix. Extension + version strings only.
+
+### Fixed
+
+- **On-screen keyboard popping up when a tool result is sent back to the AI.**
+  The old fix blurred the composer once right after the send click, but chat
+  sites refocus their composer on their own a moment later (after the submit,
+  and again when the reply finishes), which raised the keyboard. A keyboard
+  guard now covers the whole send-and-reply cycle: the composer is set to
+  `inputmode="none"` while OrbitBridge automates it, any focus the user did
+  not cause is blurred immediately (capture-phase `focusin`), and a blur burst
+  runs after every send. Tapping the composer yourself lifts the guard at once,
+  so typing normally still works.
+
 ## OrbitBridge v1.8.0 (2026-10-09)
 
 Detection rewritten, tools-per-message control, and the extension now updates

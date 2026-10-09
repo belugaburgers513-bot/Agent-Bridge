@@ -7,7 +7,7 @@
   if (window.OB_UI) return;
 
   const HOST_ID = 'ob-root';
-  const VERSION = '1.8.0';
+  const VERSION = '1.8.1';
 
   /* ----------------------------------------------------------------- bar CSS
      v1.7: ZeroScript-style composer status bar (light DOM, page-level styles —

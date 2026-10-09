@@ -256,7 +256,7 @@
         input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      setTimeout(() => { try { input.blur(); } catch (e3) { /* ignore */ } }, 60);
+      try { kbBlurBurst(); } catch (e3) { /* ignore */ }
     }
     return true;
   }
@@ -293,10 +293,9 @@
       const disabled = b ? (b.disabled || b.getAttribute('aria-disabled') === 'true' || b.classList.contains('disabled')) : true;
       if (b && !disabled) {
         b.click();
-        // Do not leave the (previously focused) chat box focused — keeps the
-        // keyboard from staying open after an automated send.
-        const input = getChatInput();
-        if (input && document.activeElement === input) { try { input.blur(); } catch (e) { /* ignore */ } }
+        // Sites refocus the composer on their own right after a submit; a single
+        // blur loses that race, so run the blur burst (keyboard guard).
+        try { kbHold(); kbBlurBurst(); } catch (e) { /* ignore */ }
         return true;
       }
       await sleep(40);
@@ -322,6 +321,119 @@
 
   const COVER_Z = 2147483500;
   const coverState = { el: null, raf: 0, on: false, shownAt: 0, minMs: 450 };
+
+  /* ================= v1.9 KEYBOARD GUARD. The on-screen keyboard used to pop up
+     every time OrbitBridge typed a tool result into the chat and sent it. The
+     old fix (one blur right after the click) lost the race: chat sites focus
+     their composer themselves, asynchronously, after a submit (and again when
+     a reply finishes streaming), and Android raises the keyboard on that focus.
+     Three layers now stop it:
+       1. inputmode="none" on the composer while we automate it — a focused
+          editor with inputmode none never raises the keyboard;
+       2. a capture-phase focusin guard that immediately blurs any focus the
+          USER did not cause (no trusted tap/key on the composer just before);
+       3. a blur burst after every send that out-lasts the site's own refocus.
+     A real tap on the composer lifts the guard at once, so typing yourself
+     still works normally. === */
+  const KB_TAIL_MS = 4000;
+  const kb = { until: 0, im: undefined, el: null, lastGesture: 0, timer: 0, wired: false };
+
+  const kbIsEditable = (n) => !!(n && (n.tagName === 'TEXTAREA' || n.tagName === 'INPUT' || n.isContentEditable));
+  // Guard is up while an automated send runs, for a tail after it, and for as
+  // long as we are waiting for the AI's reply (the site refocuses when it ends).
+  const kbActive = () => Date.now() < kb.until || coverState.on || awaitingResponse;
+
+  // Did a (real) touch/click/key land on the composer or its box?
+  function kbNearComposer(t) {
+    try {
+      const ed = getChatInput();
+      if (!ed || !t || !t.nodeType) return false;
+      const node = t.nodeType === 1 ? t : t.parentElement;
+      if (!node || inPanel(node)) return false;
+      if (ed === node || ed.contains(node)) return true;
+      let box = ed.parentElement;
+      for (let i = 0; i < 4 && box && box !== document.body; i++) {
+        if (box.contains(node)) return true;
+        box = box.parentElement;
+      }
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  function kbRestoreIm() {
+    const el = kb.el;
+    kb.el = null;
+    if (!el) return;
+    try {
+      if (kb.im === null || kb.im === undefined) el.removeAttribute('inputmode');
+      else el.setAttribute('inputmode', kb.im);
+    } catch (e) { /* ignore */ }
+    kb.im = undefined;
+  }
+
+  function kbTick() {
+    clearTimeout(kb.timer);
+    if (superseded()) { kbRestoreIm(); return; }
+    if (kbActive()) { kb.timer = setTimeout(kbTick, 300); return; }
+    kbRestoreIm();
+  }
+
+  // Blur whatever editable element is focused (except our own panel) — repeated
+  // over ~1.2s so it outlasts the site's own post-send refocus.
+  function kbBlurBurst() {
+    const run = () => {
+      try {
+        if (Date.now() - kb.lastGesture < 1500) return; // the user just tapped the composer: leave it alone
+        const a = document.activeElement;
+        if (a && a !== document.body && !inPanel(a) && kbIsEditable(a) && a.blur) a.blur();
+      } catch (e) { /* ignore */ }
+    };
+    run();
+    for (const d of [0, 50, 140, 300, 600, 1000, 1500]) setTimeout(run, d);
+  }
+
+  function kbWire() {
+    if (kb.wired) return;
+    kb.wired = true;
+    const onGesture = (e) => {
+      if (superseded() || !e.isTrusted) return;
+      if (kbNearComposer(e.target)) {
+        kb.lastGesture = Date.now();
+        // the user is about to type: lift the guard BEFORE the browser focuses
+        kb.until = 0;
+        kbRestoreIm();
+      }
+    };
+    for (const t of ['pointerdown', 'touchstart', 'mousedown', 'keydown']) {
+      document.addEventListener(t, onGesture, { capture: true, passive: true });
+    }
+    document.addEventListener('focusin', (e) => {
+      if (superseded() || !kbActive()) return;
+      const t = e.target;
+      if (!t || inPanel(t) || !kbIsEditable(t)) return;
+      if (Date.now() - kb.lastGesture < 1500) return; // user-caused focus
+      kbBlurBurst();
+    }, true);
+  }
+
+  // Raise the guard for `ms` (default tail) and mute the composer's keyboard.
+  function kbHold(ms) {
+    try {
+      kb.until = Math.max(kb.until, Date.now() + (ms || KB_TAIL_MS));
+      kbWire();
+      const ed = getChatInput();
+      if (ed) {
+        if (kb.el && kb.el !== ed) kbRestoreIm(); // the SPA swapped the editor
+        if (!kb.el) {
+          kb.el = ed;
+          kb.im = ed.hasAttribute('inputmode') ? ed.getAttribute('inputmode') : null;
+        }
+        if (ed.getAttribute('inputmode') !== 'none') ed.setAttribute('inputmode', 'none');
+      }
+      clearTimeout(kb.timer);
+      kb.timer = setTimeout(kbTick, 300);
+    } catch (e) { /* never block a send on the guard */ }
+  }
 
   function ensurePageStyles() {
     if (document.getElementById('ob-page-styles')) return;
@@ -493,7 +605,9 @@
   // verify, retry up to 3 times. Sets the awaiting-response bookkeeping.
   async function typeAndSend(text, opts = {}) {
     const maxTry = opts.retries === undefined ? 3 : opts.retries;
+    kbHold(); // keyboard guard up BEFORE we touch the composer
     for (let attempt = 1; attempt <= maxTry; attempt++) {
+      kbHold();
       coverOn(attempt === 1 ? (opts.label || 'OrbitBridge is working…') : `Retrying send (${attempt}/${maxTry})…`);
       const ok = setChatInputValue(text);
       if (!ok) { coverOff(); return false; }
@@ -507,6 +621,7 @@
         try { armPendingChip(text, opts.chip); } catch (e) { /* cosmetic */ }
         try { scheduleChipSweep(); } catch (e) { /* ignore */ }
         coverOff();
+        kbHold(); kbBlurBurst(); // keep guarding while the AI replies
         return true;
       }
       // 'stuck': the site never accepted the message — loop and retry
