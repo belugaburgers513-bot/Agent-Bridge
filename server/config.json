@@ -1,0 +1,23 @@
+{
+  "port": 3456,
+  "workspaceRoot": "~",
+  "strictWorkspace": true,
+  "allowedOrigins": [],
+  "commandTimeoutMs": 60000,
+  "mcpServers": {},
+  "allowPrivateFetch": false,
+  "trustProxyHeaders": false,
+  "commandDenylist": [
+    "rm -rf /",
+    "rm -rf /*",
+    "mkfs",
+    "dd if=/dev/zero of=/dev/",
+    ":(){ :|:& };:",
+    "chmod -R 777 /",
+    "shutdown",
+    "reboot",
+    "history -c",
+    "iptables -F",
+    "ufw disable"
+  ]
+}

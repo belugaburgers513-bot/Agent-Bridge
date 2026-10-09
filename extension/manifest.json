@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "OrbitBridge — VPS Agent",
+  "version": "1.7.0",
+  "description": "Your Ubuntu VPS inside AI chats: terminal, files (upload, download, zip), git, web fetch and MCP. Parallel tools on one VPS, Live activity tab, prompt series queue, multi-VPS. Mobile-first panel for Lemur.",
+  "permissions": ["storage", "scripting", "alarms"],
+  "host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Open OrbitBridge panel",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.deepseek.com/*",
+        "https://chat.z.ai/*",
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": ["ui.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
