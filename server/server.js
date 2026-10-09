@@ -21,7 +21,7 @@ const parallelTools = require('./tools/parallel_tools');
 const installer = require('./installer');
 const { getTerminalSession } = require('./tools/terminal_session');
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const STARTED_AT = new Date().toISOString();
 
 process.on('uncaughtException', (err) => console.error('[Server Error] Uncaught:', err));
@@ -455,6 +455,37 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/logs' && req.method === 'GET') {
       sendJson(res, 200, { logs: recentLogs });
+      return;
+    }
+
+    // ---- Extension auto-update (v1.8): the server ships its own copy of the
+    // extension (OB_HOME/extension, installed by ob-install.sh) and serves it
+    // to the extension's updater. sha256 lets the worker verify every byte.
+    const OTA_WHITELIST = ['ui.js', 'content.js'];
+    const OTA_EXT_DIR = process.env.OB_EXT_DIR || path.join(__dirname, '..', 'extension');
+    if (url.pathname === '/api/ota/manifest' && req.method === 'GET') {
+      try {
+        const mf = JSON.parse(fs.readFileSync(path.join(OTA_EXT_DIR, 'manifest.json'), 'utf8'));
+        const files = OTA_WHITELIST.map((name) => {
+          const buf = fs.readFileSync(path.join(OTA_EXT_DIR, name));
+          return { name, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') };
+        });
+        sendJson(res, 200, { success: true, ota: { version: mf.version, files, built: fs.statSync(path.join(OTA_EXT_DIR, 'manifest.json')).mtime.toISOString() } });
+      } catch (e) {
+        sendJson(res, 200, { success: false, error: 'OTA files not installed on this server — update the server package (bash ob-install.sh --update)' });
+      }
+      return;
+    }
+    if (url.pathname === '/api/ota/file' && req.method === 'GET') {
+      const name = url.searchParams.get('name') || '';
+      if (!OTA_WHITELIST.includes(name)) { sendJson(res, 400, { success: false, error: 'Unknown OTA file' }); return; }
+      try {
+        const buf = fs.readFileSync(path.join(OTA_EXT_DIR, name));
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(buf);
+      } catch (e) {
+        sendJson(res, 404, { success: false, error: 'OTA file missing on this server' });
+      }
       return;
     }
 

@@ -7,7 +7,7 @@ on your own server: terminal commands, file management, git, web fetch and MCP �
 driven by the AI, streamed live to your phone, with a ZeroScript-style status
 bar docked to the chat composer.
 
-![version](https://img.shields.io/badge/version-1.7.0-blue) ![platform](https://img.shields.io/b/platform-VPS%20Ubuntu%20%2B%20Chromium%20Android-orange) ![node](https://img.shields.io/badge/node-%E2%89%A518-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![version](https://img.shields.io/badge/version-1.8.0-blue) ![platform](https://img.shields.io/b/platform-VPS%20Ubuntu%20%2B%20Chromium%20Android-orange) ![node](https://img.shields.io/badge/node-%E2%89%A518-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
 
@@ -39,9 +39,10 @@ bar docked to the chat composer.
 
 **Agent in your chat**
 - Terminal exec, file upload/download/zip/extract, git tools, web fetch, MCP servers
-- Up to **6 parallel tool calls** per message + `parallel_commands` for 2–8 simultaneous shells
+- **You set the tools-per-message cap** (1–12, default 6) + `parallel_commands` for 2–8 simultaneous shells
 - Multiple VPS servers — switch the active one from the panel
 - Background tools with progress, prompt queue that survives browser closes
+- **Self-updating**: after a one-time install, the extension pulls new builds from your server (sha256-verified, idle chat tabs auto-reload) — no more unzip + reload cycles
 
 **ZeroScript-style UI**
 - Live status bar docked to the chat composer (breathing dot + agent state) — no floating buttons
@@ -148,8 +149,10 @@ extraction. Re-running any install/update **preserves your token**.
 ## Updating & rollback
 
 - **Server:** re-run the installer and pick `9) Update to latest` — or
-  `bash ob-install.sh --update`. Token survives.
-- **Extension:** grab the new `orbitbridge.zip` from
+  `bash ob-install.sh --update`. Token survives. The update also refreshes the
+  extension copy the OTA server serves.
+- **Extension:** from v1.8 on it updates ITSELF (Settings → Extension updates).
+  For the one-time jump to v1.8: grab `orbitbridge.zip` from
   [Releases](https://github.com/belugaburgers513-bot/Agent-Bridge/releases), replace the
   folder, hit *Reload* on `chrome://extensions`.
 - **Rollback:** every release keeps its assets — download an older version from

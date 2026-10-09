@@ -1,9 +1,13 @@
 {
   "name": "orbitbridge-server",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "OrbitBridge server: connects browser AI chats to an Ubuntu VPS",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT"
 }

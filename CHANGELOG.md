@@ -1,5 +1,52 @@
 # Changelog
 
+## OrbitBridge v1.8.0 (2026-10-09)
+
+Detection rewritten, tools-per-message control, and the extension now updates
+itself from your server — no more download/unzip/reload cycles.
+
+### Fixed — tool-call detection
+
+- **New calls mistaken for old ones** (the "Found an earlier terminal call"
+  misfire on fresh AI replies). The v1.7 boot window permanently swallowed any
+  tool call that landed within 3.5s of a page load or chat switch — which is
+  exactly when the first reply of a new chat arrives. History is now decided
+  per chat turn (stable node identity), never by a timing window: turns whose
+  text is settled and that are not streaming when the page boots are history;
+  everything after is live and runs.
+- **Answered calls could replay.** The old dedup key used the message's first
+  100 chars, which shift while the message streams — an already-run call could
+  pass the check and execute a second time. A call whose turn is followed by a
+  later `[TOOL_RESULT]` wall can never run again, regardless of re-renders.
+- **Prose quoting JSON could trigger a run.** Bare (unfenced) JSON must now
+  sit on its own line(s), carry an explicit `"params"` key and a sane tool id;
+  fenced blocks stay lenient. Extracted text also strips thinking blocks, our
+  own chips and editors, and restores line structure around rendered code
+  blocks (plain textContent glues adjacent `<pre>` blocks into one line).
+- **History offers spammed.** A stale call is now offered once per turn.
+- **Identical repeated calls in one message** were silently deduped to one;
+  both run now (occurrence-indexed signatures keep re-render dedup correct).
+
+### Added
+
+- **Tools per message**: set your own cap (1–12) for how many tool calls one
+  AI message may run — Agent tab stepper, stored per browser, default 6.
+- **Extension auto-update (OTA)**: the server ships its copy of the extension
+  and the browser extension pulls new builds from it — sha256-verified, then
+  injected via the `chrome.userScripts` API. Idle chat tabs reload
+  automatically (busy ones are skipped and picked up later); falls back to the
+  bundled engine when the browser can't run user scripts. Settings → Extension
+  updates shows installed vs running version, Check now and an Auto-update
+  toggle (30-minute silent checks). One last manual install of v1.8 is needed;
+  after that, updates flow from the server.
+
+### Server
+
+- New authenticated endpoints: `GET /api/ota/manifest` (version + sha256 per
+  file) and `GET /api/ota/file?name=` (whitelisted text files), served from
+  `OB_HOME/extension`. `ob-install.sh` now installs the extension copy next to
+  the server (and stops deleting it from the codeload fallback).
+
 ## OrbitBridge v1.7.0 (2026-10-09)
 
 "Animations don't show up" — fixed at the root, and the floating blue button

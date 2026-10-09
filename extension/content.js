@@ -13,8 +13,19 @@
   // injects a FRESH engine (new token) — the old zombie's timers check the token
   // and self-idle instead of double-executing tool calls alongside the new engine.
   const MY_GEN = Math.random().toString(36).slice(2);
-  window.__obEngine = MY_GEN;
+  // v1.8 OTA: window.__obEngine is now claimed INSIDE startEngine(), so a newer
+  // auto-update bundle (injected by the background via chrome.userScripts) can
+  // own the page first — see bootGate() at the bottom of this file.
   const superseded = () => window.__obEngine !== MY_GEN;
+  const OB_VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return '0.0.0'; } })();
+  // Stamped by the background worker right before the OTA core code: marks THIS
+  // copy as the auto-updated one (the bundled copy must yield to it).
+  const OTA_RUNNING = typeof window.__OB_OTA_VERSION === 'string' && !!window.__OB_OTA_VERSION;
+  function cmpVer(a, b) {
+    const p = String(a || '').split('.').map(Number), q = String(b || '').split('.').map(Number);
+    for (let i = 0; i < 3; i++) { const d = (p[i] || 0) - (q[i] || 0); if (d) return d; }
+    return 0;
+  }
 
   const UI = window.OB_UI;
   const HOST = location.hostname;
@@ -63,7 +74,8 @@
   let awaitingResponse = false;
   let awaitingSince = 0;
   let lastDetected = null; // { toolCall, el }
-  let bootUntil = Date.now() + 3500; // existing tool calls in an opened chat are NOT auto-run
+  let bootUntil = Date.now() + 3500; // boot calm-down window (history is classified by turn snapshots, not by swallowing calls)
+  let maxTools = 6; // v1.8: user-configurable cap of tool calls per AI message (1..12)
   let lastHref = location.href;
   let serverOnline = false;
   let keepAliveTimer = null;
@@ -71,6 +83,8 @@
   let activeVpsId = null;
   let multiVps = false;
   let chatVpsMap = {}; // chatKey -> profileId
+
+  const clampMaxTools = (v) => Math.max(1, Math.min(12, Number(v) || 6));
 
   const chatKey = () => location.pathname + location.search;
 
@@ -842,7 +856,7 @@
   }
 
   /* ------------------------------------------------------- tool parsing */
-  const MAX_PARALLEL = 6;
+  const DEFAULT_MAX_TOOLS = 6;
 
   function safeJsonParse(str) {
     try { return JSON.parse(str); } catch (e) { /* try to repair raw newlines in strings */ }
@@ -869,8 +883,17 @@
     return null;
   }
 
-  /** Extract EVERY tool call in a message: single JSON, JSON array, or several blocks. */
-  function extractToolCalls(rawText) {
+  /** Extract EVERY tool call in a message. v1.8 rework:
+   *  - `limit` = tools per message (user setting, 1..12).
+   *  - Fenced ```tool/```json blocks stay LENIENT (explicit protocol).
+   *  - Bare JSON (no fence) is STRICT: it must sit on its own line(s), carry an
+   *    explicit "params" key and a sane tool id. Inline JSON the AI writes in
+   *    prose ("the config has \"tool\": \"terminal\"...") no longer executes.
+   *  - Identical calls in one message are NO LONGER deduped away — the AI can
+   *    legitimately run the same command twice (occurrence-indexed sigs in the
+   *    scanner keep re-render dedup correct). */
+  function extractToolCalls(rawText, limit) {
+    const cap = Math.max(1, Math.min(24, Number(limit) || DEFAULT_MAX_TOOLS));
     if (!rawText) return [];
     let text = rawText;
     const thinkEnd = text.lastIndexOf('</think>');
@@ -880,7 +903,7 @@
     const calls = [];
     const push = (p) => {
       for (const c of [].concat(normalizeCall(p) || [])) {
-        if (c && calls.length < MAX_PARALLEL && !calls.some((x) => x.tool === c.tool && JSON.stringify(x.params) === JSON.stringify(c.params))) calls.push(c);
+        if (c && calls.length < cap) calls.push(c);
       }
     };
 
@@ -892,17 +915,15 @@
     }
     if (calls.length) return calls;
 
-    // 2) brace-scan for every "tool": "..." occurrence (bare JSON without a fence)
-    const re = /"tool"\s*:\s*"/i;
-    let rest = text;
-    while (calls.length < MAX_PARALLEL) {
-      const at = rest.search(re);
-      if (at === -1) break;
-      const open = rest.lastIndexOf('{', at);
-      if (open === -1) break;
+    // 2) bare JSON, STRICT (v1.8): opening { must start a line, closing } must
+    // end its line, "tool" AND "params" keys required.
+    const openRe = /(^|\n)[ \t]*\{/g;
+    let m;
+    while (calls.length < cap && (m = openRe.exec(text))) {
+      const open = m.index + m[0].length - 1; // the '{'
       let depth = 0, close = -1, inStr = false, esc = false;
-      for (let i = open; i < rest.length; i++) {
-        const ch = rest[i];
+      for (let i = open; i < text.length; i++) {
+        const ch = text[i];
         if (esc) { esc = false; continue; }
         if (ch === '\\') { esc = true; continue; }
         if (ch === '"') { inStr = !inStr; continue; }
@@ -912,9 +933,15 @@
         }
       }
       if (close === -1) break;
-      const parsed = safeJsonParse(rest.slice(open, close + 1));
-      if (parsed && typeof parsed.tool === 'string') push(parsed);
-      rest = rest.slice(close + 1);
+      // closing brace must be line-final (whitespace up to \n or EOF)
+      let j = close + 1;
+      while (j < text.length && (text[j] === ' ' || text[j] === '\t')) j++;
+      if (j < text.length && text[j] !== '\n' && text[j] !== '\r') { openRe.lastIndex = close + 1; continue; }
+      const body = text.slice(open, close + 1);
+      if (!/"params"\s*:/.test(body) || !/"tool"\s*:/.test(body)) { openRe.lastIndex = close + 1; continue; }
+      const parsed = safeJsonParse(body);
+      if (parsed && typeof parsed.tool === 'string' && /^[a-z][a-z0-9_.-]*$/i.test(parsed.tool.trim())) push(parsed);
+      openRe.lastIndex = close + 1;
     }
     return calls;
   }
@@ -1126,8 +1153,14 @@
     startKeepAlive();
     (els || []).forEach((el) => {
       if (!el) return;
-      el.setAttribute('data-ob-handled', 'true');
-      el.closest(MD_SEL)?.setAttribute('data-ob-container-handled', 'true');
+      try {
+        // v1.8: els are TURN ROOTS now (not pre blocks) — mark the root itself
+        // AND its markdown container so either shape of re-render is covered.
+        el.setAttribute('data-ob-handled', 'true');
+        el.setAttribute('data-ob-container-handled', 'true');
+        const md = el.closest(MD_SEL);
+        if (md && md !== el) md.setAttribute('data-ob-container-handled', 'true');
+      } catch (e) { /* ignore */ }
     });
     setDetected(null);
 
@@ -1195,8 +1228,19 @@
   }
 
   /* --------------------------------------------------------- scanning */
-  const executed = new Set(); // callSig() — content-based, stable across site re-renders
-  const stable = new WeakMap(); // el -> { text, since }
+  const executed = new Set(); // callSig()#occurrence — content-based, stable across site re-renders
+  const stable = new WeakMap(); // container el -> { text, since }
+  const extractCache = new WeakMap(); // container el -> { text, calls }
+  // v1.8 history discrimination. This REPLACES the v1.7 boot-window
+  // executed.add(), which wrongly swallowed NEW tool calls that landed within
+  // 3.5s of a page load / chat switch ("Found an earlier terminal call" on a
+  // fresh AI reply — the #1 user report), and whose mid-stream message
+  // prefixes later shifted, so the very same old call could re-run after the
+  // message finished streaming. History is now decided per TURN (stable node
+  // identity), never per unstable text prefix.
+  let bootTurns = new WeakSet();      // assistant turns already in the DOM at boot (hydrated history)
+  let historyOffered = new WeakSet(); // turns whose stale call we already offered as "Run"
+  let wallDoneTurns = new WeakSet();  // turns a later [TOOL_RESULT] wall already answered
 
   // v1.6.1: the dedup key is CONTENT (tool + params + message prefix), not the
   // message's DOM index — the index shifts every time a new message lands,
@@ -1217,51 +1261,177 @@
     return '';
   }
 
+  // --- v1.8 turn helpers (history gates) --------------------------------
+  // Ordered list of turn roots, assistant + user markers together.
+  const ALL_TURN_SEL = SITE === 'deepseek' ? '.ds-message'
+    : ([TURNS.assistant, TURNS.user].filter(Boolean).join(', ') || (MD_SEL + ', ' + USER_SEL));
+  function turnIsUser(t) {
+    try {
+      if (SITE === 'deepseek') return !t.querySelector('.ds-markdown'); // one root for BOTH roles there
+      if (TURNS.user) return t.matches(TURNS.user);
+      return !!(t.matches(USER_SEL) || t.querySelector(USER_SEL));
+    } catch (e) { return false; }
+  }
+  function assistantTurnsList() {
+    try { return Array.from(document.querySelectorAll(ALL_TURN_SEL)).filter((t) => t && !inPanel(t)); }
+    catch (e) { return []; }
+  }
+  // A call is ALREADY ANSWERED when a USER turn AFTER the call's turn carries a
+  // [TOOL_RESULT] wall — the agent itself replied to it in this conversation.
+  // Reads CONTENT, so it still works after the site re-created every node.
+  function answeredAfterTurn(turn) {
+    try {
+      if (!turn) return false;
+      const list = assistantTurnsList();
+      const idx = list.indexOf(turn);
+      if (idx === -1) return false;
+      for (let i = idx + 1; i < list.length; i++) {
+        const t = list[i];
+        if (!turnIsUser(t)) continue;
+        if ((t.textContent || '').includes('TOOL_RESULT')) return true;
+      }
+    } catch (e) { /* unreadable → treat as unanswered */ }
+    return false;
+  }
+  // Boot-time history snapshot: a turn whose text is UNCHANGED across a tick
+  // and that is not part of an active generation is hydrated old content.
+  // Streaming replies keep mutating (or generation is on), so a fresh tool
+  // call can no longer be misclassified as "earlier" — the v1.7 bug.
+  function bootSnapshotTick(prevTexts) {
+    try {
+      if (isGenerating()) return; // something is streaming — decide nothing this tick
+      for (const t of assistantTurnsList()) {
+        if (bootTurns.has(t)) continue;
+        const txt = t.textContent || '';
+        if (prevTexts.get(t) === txt) bootTurns.add(t);
+        else prevTexts.set(t, txt);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // Candidate containers, v1.8: per-site ASSISTANT TURN ROOTS (stable across
+  // re-renders) instead of every pre/code/markdown node — one extraction per
+  // message, no double counting between a pre block and its parent container.
+  function candidateContainers() {
+    let list = [];
+    try { list = Array.from(document.querySelectorAll(TURNS.assistant || ('pre code, pre, [class*="code-block" i], ' + MD_SEL))); } catch (e) { return []; }
+    list = list.filter((el) => !inPanel(el));
+    if (TURNS.assistant) {
+      // DeepSeek's turn root is shared by both roles — drop user walls here.
+      return list.filter((el) => { try { return !turnIsUser(el); } catch (e) { return true; } });
+    }
+    // Unknown layout: keep only OUTERMOST candidates so nested pre/containers
+    // are never extracted twice.
+    return list.filter((el) => !list.some((o) => o !== el && o.contains(el)));
+  }
+  // Extraction text = message content MINUS thinking blocks, our own chips and
+  // hidden raw blocks, WITH line structure restored around block elements.
+  // Plain textContent concatenates adjacent <pre> blocks ("…}{"…") into ONE
+  // line, which would make the strict bare-JSON scanner reject exactly the
+  // rendered code blocks it must accept. Without this, a chip's expandable
+  // body (holding the raw call JSON) would also re-trigger detection after
+  // every site re-render.
+  function containerCallText(el) {
+    try {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(THINK_SEL + ', .ob-chip, .ob-tool-hide, [contenteditable="true"], textarea, style, script').forEach((n) => { try { n.remove(); } catch (e2) { /* ignore */ } });
+      const out = [];
+      const isBlockish = (n) => {
+        const tag = n.tagName;
+        if (tag === 'P' || tag === 'DIV' || tag === 'BR' || tag === 'LI' || tag === 'UL' || tag === 'OL' || tag === 'TABLE' || tag === 'BLOCKQUOTE' || tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4') return true;
+        try { const d = getComputedStyle(n).display; return d === 'block' || d === 'flex' || d === 'grid'; } catch (e) { return false; }
+      };
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) { out.push(child.nodeValue || ''); continue; }
+          if (child.nodeType !== 1) continue;
+          const tag = child.tagName;
+          if (tag === 'PRE' || tag === 'CODE' || (child.matches && child.matches('[class*="code-block" i]'))) {
+            out.push('\n' + (child.textContent || '') + '\n'); // rendered fence: own lines
+            continue;
+          }
+          if (tag === 'BR') { out.push('\n'); continue; }
+          const blockish = isBlockish(child);
+          if (blockish) out.push('\n');
+          walk(child);
+          if (blockish) out.push('\n');
+        }
+      };
+      walk(clone);
+      return out.join('');
+    } catch (e) { return el.textContent || ''; }
+  }
+
   function scanForToolCalls() {
     if (superseded() || activeExecution) return;
-    const cands = document.querySelectorAll('pre code, pre, [class*="code-block" i], ' + MD_SEL);
     const now = Date.now();
-    const batch = []; // { call, el }
+    const batch = []; // { call, el, sig }
 
-    for (const el of cands) {
-      if (batch.length >= MAX_PARALLEL) break;
-      if (inPanel(el) || el.getAttribute('data-ob-handled') === 'true') continue;
+    for (const el of candidateContainers()) {
+      if (batch.length >= maxTools) break;
+      if (el.getAttribute('data-ob-handled') === 'true' || el.getAttribute('data-ob-container-handled') === 'true') continue;
       if (el.closest('[data-ob-container-handled="true"]')) continue;
       if (el.closest(THINK_SEL) || el.closest(USER_SEL)) continue;
 
-      const text = el.textContent;
+      const turn = assistantTurnOf(el);
+      try { if (turn && turnIsUser(turn)) continue; } catch (e) { /* keep going */ }
+
+      const text = containerCallText(el);
       if (!text || text.indexOf('"tool"') === -1) continue;
-      const found = extractToolCalls(text);
-      if (!found.length) continue;
 
-      const container = el.closest(MD_SEL) || el;
-      for (const call of found) {
-        const sig = callSig(container, call);
-        if (executed.has(sig)) continue;
-
-        // Only act on a block whose text has stopped changing (the model finished writing it).
-        const st = stable.get(el);
-        if (!st || st.text !== text) { stable.set(el, { text, since: now }); continue; }
-        if (now - st.since < 700) continue;
-
-        // Opened an existing chat: do not replay history. Offer it as a manual action instead.
-        if (now < bootUntil) {
-          executed.add(sig);
-          setDetected(call, el);
-          UI.setActivity(`Found an earlier ${call.tool} call. Tap Run if you want it.`, 'normal', false);
-          continue;
+      // ---- v1.8 history gates (decided per TURN, stable across re-renders) ----
+      if (turn && wallDoneTurns.has(turn)) continue;
+      if (turn && answeredAfterTurn(turn)) { wallDoneTurns.add(turn); continue; }
+      if (turn && bootTurns.has(turn)) {
+        // Opened an existing chat: do not replay history. Offer it ONCE as a
+        // manual action instead (the old code re-offered on every scan).
+        if (!historyOffered.has(turn)) {
+          historyOffered.add(turn);
+          let c0 = null;
+          try { c0 = extractToolCalls(text, 1)[0] || null; } catch (e) { c0 = null; }
+          if (c0) {
+            setDetected(c0, el);
+            UI.setActivity(`Found an earlier ${c0.tool} call. Tap Run if you want it.`, 'normal', false);
+          }
         }
-
-        executed.add(sig);
-        batch.push({ call, el });
+        continue;
       }
-      if (batch.length) break; // one message (container) at a time; batch may hold several calls
+
+      // One extraction per content revision (cached); the message must have
+      // stopped changing before we act on it.
+      let cached = extractCache.get(el);
+      if (!cached || cached.text !== text) { cached = { text, calls: extractToolCalls(text, maxTools) }; extractCache.set(el, cached); }
+      if (!cached.calls.length) continue;
+      const st = stable.get(el);
+      if (!st || st.text !== text) { stable.set(el, { text, since: now }); continue; }
+      if (now - st.since < 700) continue;
+
+      // Boot calm-down: observe only, decide nothing. bootSnapshotTick owns
+      // history classification during this window; a NEW tool call that lands
+      // here simply waits for the window to pass instead of being swallowed
+      // as "earlier" (the v1.7 first-reply bug).
+      if (now < bootUntil) continue;
+
+      // Occurrence-aware signatures: two IDENTICAL calls in one message are
+      // two distinct slots, while the same call re-detected after a site
+      // re-render still matches its sig and stays executed.
+      const seen = new Map();
+      for (const call of cached.calls) {
+        if (batch.length >= maxTools) break;
+        const k = call.tool + '|' + JSON.stringify(call.params || {});
+        const occ = seen.get(k) || 0;
+        seen.set(k, occ + 1);
+        const sig = callSig(el, call) + '#' + occ;
+        if (executed.has(sig)) continue;
+        executed.add(sig);
+        batch.push({ call, el, sig });
+      }
     }
 
     if (batch.length) {
       if (isGenerating()) {
         // Model is still writing; un-claim so the next scan can pick it up.
-        batch.forEach((b) => executed.delete(callSig(b.el.closest(MD_SEL) || b.el, b.call)));
+        batch.forEach((b) => executed.delete(b.sig));
         return;
       }
       executeBatch(batch.map((b) => b.call), batch.map((b) => b.el));
@@ -1489,13 +1659,15 @@
     });
 
     try {
-      chrome.storage.local.get(['autopilot'], (r) => {
+      chrome.storage.local.get(['autopilot', 'obMaxTools'], (r) => {
         if (r && r.autopilot !== undefined) autopilot = !!r.autopilot;
         UI.setAutopilot(autopilot);
+        if (r && r.obMaxTools !== undefined) maxTools = clampMaxTools(r.obMaxTools); // v1.8
       });
       chrome.storage.onChanged.addListener((c, area) => {
         if (area !== 'local') return;
         if (c.autopilot) { autopilot = !!c.autopilot.newValue; UI.setAutopilot(autopilot); }
+        if (c.obMaxTools) maxTools = clampMaxTools(c.obMaxTools.newValue); // v1.8
         if (c.obQueue || c.obQueuePaused) renderQueueUi();
         if (c.vpsProfiles) { profilesCache = (c.vpsProfiles.newValue || []).map((p) => ({ ...p })); refreshVpsUi(); }
         if (c.activeVps) { activeVpsId = c.activeVps.newValue || null; }
@@ -1528,13 +1700,16 @@
       debounce = setTimeout(scanForToolCalls, 250);
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
 
+    const prevBootTexts = new Map(); // turn -> text at previous boot tick (v1.8 history snapshot)
     setInterval(() => {
       if (location.href !== lastHref) { // new chat / navigation: forget history, do not replay it
         lastHref = location.href;
         executed.clear(); setDetected(null);
         bootUntil = Date.now() + 3500;
+        prevBootTexts.clear(); // bootTurns survives — turn nodes of the old chat stay history
         refreshVpsUi();
       }
+      if (Date.now() < bootUntil) bootSnapshotTick(prevBootTexts); // v1.8
       checkGenerationCycle();
       scanForToolCalls();
     }, 800);
@@ -1580,8 +1755,73 @@
   }
 
   if (!UI) { console.warn('[OrbitBridge] UI failed to load'); return; }
-  // Test hook: pure chip-system functions for the jsdom regression suite.
-  window.__OB_TEST = { sweepChipsFrom, userTurnOf, isAssistantText, chipResultBubble, parseChipInfo, assistantTurnOf };
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
+  // Test hook: pure functions for the jsdom regression suites.
+  window.__OB_TEST = { sweepChipsFrom, userTurnOf, isAssistantText, chipResultBubble, parseChipInfo, assistantTurnOf,
+    extractToolCalls, scanForToolCalls, bootTick: bootSnapshotTick, expireBoot: () => { bootUntil = Date.now() - 1; },
+    getState: () => ({ maxTools, bootUntil, bootTurnsSize: 0 }) };
+
+  // ---- v1.8 OTA boot gate ----------------------------------------------
+  // The bundled engine no longer starts unconditionally: a newer auto-update
+  // bundle (delivered by the server, injected by the background via
+  // chrome.userScripts) owns the page first. Falls back to bundled code when
+  // the browser cannot run user scripts.
+  function startEngine() {
+    if (window.__obEngine) return; // OTA core (or a fresh re-injection) owns the page
+    window.__obEngine = MY_GEN;
+    init();
+  }
+
+  async function bootGate() {
+    if (OTA_RUNNING) { // this IS the auto-updated core — it always owns the page
+      try { sessionStorage.removeItem('obOtaBooted:' + window.__OB_OTA_VERSION); } catch (e) { /* ignore */ }
+      startEngine();
+      return;
+    }
+    try {
+      const r = await store.get(['obOtaBundle']);
+      const b = r && r.obOtaBundle;
+      if (b && b.version && b.files && cmpVer(b.version, OB_VERSION) > 0) {
+        const ens = await new Promise((resolve) => {
+          try { chrome.runtime.sendMessage({ type: 'OTA_ENSURE' }, (x) => { if (chrome.runtime.lastError) resolve(null); else resolve(x); }); }
+          catch (e) { resolve(null); }
+        });
+        if (ens && ens.ok) {
+          const flag = 'obOtaBooted:' + b.version;
+          let seen = false;
+          try { seen = sessionStorage.getItem(flag) === '1'; } catch (e) { /* ignore */ }
+          if (!seen) {
+            try { sessionStorage.setItem(flag, '1'); } catch (e) { /* ignore */ }
+            setTimeout(() => { try { location.reload(); } catch (e) { /* stay */ } }, 120);
+            return; // reloading into the auto-updated core
+          }
+          // One reload already happened for this version. The auto-updated
+          // core injects at document_idle — give it a moment to claim the
+          // page before falling back to the bundled engine.
+          const t0 = Date.now();
+          while (Date.now() - t0 < 1700) {
+            await sleep(150);
+            if (window.__obEngine || window.__OB_OTA_VERSION) return;
+          }
+        }
+        // Registration unavailable (old browser / "Allow user scripts" off):
+        // keep the bundled engine — status quo.
+      }
+    } catch (e) { /* storage/context gone → bundled engine */ }
+    startEngine();
+  }
+
+  // Always-on responder so the background can reload ONLY idle tabs when an
+  // update lands — works even while the engine is waiting for the OTA core.
+  try {
+    chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+      if (req && req.type === 'OTA_BUSY') {
+        sendResponse({ busy: activeExecution || isThinking || awaitingResponse || retrying });
+        return false;
+      }
+      return false;
+    });
+  } catch (e) { /* context gone */ }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootGate);
+  else bootGate();
 })();

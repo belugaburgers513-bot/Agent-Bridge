@@ -16,7 +16,7 @@
 # ============================================================================
 set -u
 
-VERSION="1.7.0"
+VERSION="1.8.0"
 REPO="belugaburgers513-bot/Agent-Bridge"
 DL_BASE="https://github.com/${REPO}/releases/latest/download"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
@@ -152,7 +152,8 @@ fetch_pkg() {
   tar -xzf "$tgz" -C "$stage" 2>/dev/null || { rm -rf "$stage" "$tgz"; die "codeload tarball is corrupted"; }
   local src; src="$(echo "$stage"/*/ | head -1)"
   [ -f "$src/server/server.js" ] || { rm -rf "$stage" "$tgz"; die "codeload tarball missing server/"; }
-  rm -rf "$src/extension" 2>/dev/null || true   # server install only needs server/
+  # v1.8: extension/ is KEPT — the server serves it to the extension's
+  # self-updater (/api/ota/*). Deleting it would silently disable auto-update.
   mv "$src" "$stage/pkg"
   echo "$stage/pkg" > /tmp/.ob_pkg_stage
   PKG_FILE="$stage/pkg"; PKG_KIND="dir"
@@ -179,6 +180,13 @@ install_server_files() {
   [ -f "$src/server/server.js" ] || { rm -rf "$stage"; die "package layout unexpected (no server/)"; }
   mkdir -p "$OB_HOME"
   cp -a "$src/server" "$OB_HOME/" || { rm -rf "$stage"; die "copying server failed"; }
+  # v1.8: install the extension copy too — the server's /api/ota/* endpoints
+  # serve these files so the browser extension can update itself.
+  if [ -d "$src/extension" ]; then
+    cp -a "$src/extension" "$OB_HOME/" || say "  ${C_Y}warn: could not copy extension/ — extension auto-update will be unavailable${C_0}"
+  else
+    say "  ${C_Y}warn: package has no extension/ — extension auto-update will be unavailable${C_0}"
+  fi
   cp -a "$src/CHANGELOG.md" "$src/LICENSE" "$src/README.md" "$OB_HOME/" 2>/dev/null || true
   rm -rf "$stage" /tmp/.ob_pkg_stage 2>/dev/null || true
   if [ -f "$SRV_DIR/.token" ]; then ok "server files in place (existing token preserved)"

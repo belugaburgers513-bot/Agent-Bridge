@@ -205,6 +205,27 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       .then(sendResponse).catch((e) => sendResponse({ success: false, error: e.message }));
     return true;
   }
+  if (req && req.type === 'CHECK_OTA') {
+    // v1.8: check the VPS for a newer extension build, download + verify + register.
+    otaCheck(false).then(sendResponse).catch((e) => sendResponse({ status: 'error', error: e.message }));
+    return true;
+  }
+  if (req && req.type === 'OTA_ENSURE') {
+    // Called by the bundled content.js bootGate: make sure the newer core is
+    // registered before the page reloads into it.
+    otaEnsureRegistered().then(sendResponse).catch((e) => sendResponse({ ok: false, reason: e.message }));
+    return true;
+  }
+  if (req && req.type === 'OTA_STATUS') {
+    chrome.storage.local.get(['obOtaState', 'obOtaBundle', 'obOtaAuto'], (r) => {
+      sendResponse({ success: true, installed: EXT_VERSION, ota: (r.obOtaBundle && r.obOtaBundle.version) || null, state: r.obOtaState || null, auto: r.obOtaAuto !== false });
+    });
+    return false;
+  }
+  if (req && req.type === 'OTA_RELOAD_TABS') {
+    otaReloadIdleTabs().then((n) => sendResponse({ success: true, reloaded: n })).catch((e) => sendResponse({ success: false, error: e.message }));
+    return true;
+  }
   return false;
 });
 
@@ -410,6 +431,157 @@ try {
           tabMessage(t.id, { type: 'NUDGE' });
         }
       });
+    } catch (e) { /* ignore */ }
+  });
+} catch (e) { /* alarms unavailable */ }
+
+/* ================================================= extension auto-update (v1.8) ===
+ * The extension updates ITSELF from the VPS — no more download/unzip/reload.
+ * Flow: server ships its copy of the extension (OB_HOME/extension) and exposes
+ *   GET /api/ota/manifest  -> { version, files[{name, sha256, size}] }
+ *   GET /api/ota/file?name -> file text (whitelist)
+ * The worker compares versions, downloads + sha256-verifies the bundle into
+ * chrome.storage.local (obOtaBundle), then registers it with the
+ * chrome.userScripts API (world ISOLATED — the same world the bundled content
+ * scripts live in, so probes/reviver/engine guards keep working). The bundled
+ * content.js bootGate() yields to the newer core (one reload, loop-guarded).
+ * Falls back to the bundled engine when the browser cannot run user scripts.
+ */
+const OTA_FILES = ['ui.js', 'content.js'];
+const EXT_VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return '0.0.0'; } })();
+
+function cmpVer(a, b) {
+  const p = String(a || '').split('.').map(Number), q = String(b || '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { const d = (p[i] || 0) - (q[i] || 0); if (d) return d; }
+  return 0;
+}
+
+async function sha256Hex(text) {
+  const buf = new TextEncoder().encode(text);
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// Raw text fetch (callApi only speaks JSON).
+async function fetchOtaText(name) {
+  const { base, token } = await getSettings();
+  if (!token && !/^http:\/\/(127\.0\.0\.1|localhost)/.test(base)) return { success: false, code: 'NO_TOKEN', error: 'No token set. Open Settings and paste your token.' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const res = await fetch(base + '/api/ota/file?name=' + encodeURIComponent(name), {
+      cache: 'no-store', signal: ctrl.signal, headers: token ? { Authorization: 'Bearer ' + token } : {}
+    });
+    if (res.status === 401) return { success: false, code: 'UNAUTHORIZED', error: 'Wrong token. Check Settings.' };
+    if (!res.ok) return { success: false, code: 'HTTP', error: `Server returned HTTP ${res.status} for ${name}` };
+    return { success: true, text: await res.text() };
+  } catch (err) {
+    return { success: false, code: 'OFFLINE', error: 'Cannot reach the server (update check failed)' };
+  } finally { clearTimeout(timer); }
+}
+
+async function otaEnsureRegistered() {
+  try {
+    if (!chrome.userScripts || typeof chrome.userScripts.register !== 'function') {
+      await chrome.storage.local.set({ obOtaState: { status: 'unsupported', reason: 'This browser has no userScripts API (needs Chrome 120+)', at: Date.now() } });
+      return { ok: false, reason: 'unsupported' };
+    }
+    const { obOtaBundle: b } = await chrome.storage.local.get(['obOtaBundle']);
+    if (!b || !b.version || !b.files) return { ok: false, reason: 'no_bundle' };
+    const js = [
+      { code: String(b.files['ui.js'] || '') },
+      { code: 'window.__OB_OTA_VERSION=' + JSON.stringify(b.version) + ';\n' + String(b.files['content.js'] || '') }
+    ];
+    const script = { id: 'ob-core', matches: CHAT_MATCHES, js, world: 'ISOLATED', runAt: 'document_idle' };
+    let existing = [];
+    try { existing = await chrome.userScripts.getScripts({ ids: ['ob-core'] }) || []; } catch (e) { existing = []; }
+    if (existing.length) await chrome.userScripts.update([{ id: 'ob-core', js, world: 'ISOLATED', matches: CHAT_MATCHES }]);
+    else await chrome.userScripts.register([script]);
+    await chrome.storage.local.set({ obOtaState: { status: 'active', version: b.version, at: Date.now() } });
+    return { ok: true, version: b.version };
+  } catch (e) {
+    const reason = String((e && e.message) || e);
+    await chrome.storage.local.set({ obOtaState: { status: 'blocked', reason, at: Date.now() } }).catch(() => {});
+    return { ok: false, reason };
+  }
+}
+
+// Reload chat tabs to activate an applied update — but NEVER a tab that is
+// mid-run (the content script answers OTA_BUSY with its live state).
+async function otaReloadIdleTabs() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({ url: CHAT_MATCHES }) || []; } catch (e) { return 0; }
+  let n = 0;
+  for (const t of tabs) {
+    if (t.id == null) continue;
+    const busy = await tabMessage(t.id, { type: 'OTA_BUSY' });
+    if (busy && busy.busy) continue;
+    try { await chrome.tabs.reload(t.id); n++; } catch (e) { /* ignore */ }
+  }
+  return n;
+}
+
+async function otaCheck(auto) {
+  const man = await callApi({ method: 'GET', path: '/api/ota/manifest', timeoutMs: 30000 });
+  if (!man || !man.success || !man.ota || !man.ota.version) {
+    const error = (man && (man.error || man.code)) || 'No OTA manifest (update the server package)';
+    await chrome.storage.local.set({ obOtaState: { status: 'error', reason: error, at: Date.now() } }).catch(() => {});
+    return { status: 'error', error };
+  }
+  const remote = man.ota;
+  if (cmpVer(remote.version, EXT_VERSION) <= 0) {
+    await chrome.storage.local.set({ obOtaState: { status: 'current', version: remote.version, at: Date.now() } }).catch(() => {});
+    return { status: 'current', version: remote.version, installed: EXT_VERSION };
+  }
+  const files = {};
+  for (const f of remote.files || []) {
+    if (!OTA_FILES.includes(f.name)) continue;
+    const r = await fetchOtaText(f.name);
+    if (!r.success) {
+      await chrome.storage.local.set({ obOtaState: { status: 'error', reason: r.error, at: Date.now() } }).catch(() => {});
+      return { status: 'error', error: r.error };
+    }
+    let hex = '';
+    try { hex = await sha256Hex(r.text); } catch (e) { hex = ''; }
+    if (f.sha256 && hex && hex !== f.sha256) {
+      const error = `Checksum mismatch for ${f.name} — update aborted`;
+      await chrome.storage.local.set({ obOtaState: { status: 'error', reason: error, at: Date.now() } }).catch(() => {});
+      return { status: 'error', error };
+    }
+    files[f.name] = r.text;
+  }
+  if (!files['content.js'] || !files['ui.js']) {
+    const error = 'Update bundle incomplete';
+    await chrome.storage.local.set({ obOtaState: { status: 'error', reason: error, at: Date.now() } }).catch(() => {});
+    return { status: 'error', error };
+  }
+  await chrome.storage.local.set({ obOtaBundle: { version: remote.version, files, at: Date.now() } });
+  const ens = await otaEnsureRegistered();
+  const out = { status: 'updated', version: remote.version, registered: ens.ok, installed: EXT_VERSION };
+  if (ens.ok && auto) {
+    try { out.reloaded = await otaReloadIdleTabs(); } catch (e) { /* ignore */ }
+  }
+  return out;
+}
+
+// Re-register the stored bundle after every worker restart (registrations are
+// cleared when the extension reloads/updates).
+(async () => {
+  try {
+    const { obOtaBundle } = await chrome.storage.local.get(['obOtaBundle']);
+    if (obOtaBundle) await otaEnsureRegistered();
+  } catch (e) { /* ignore */ }
+})();
+
+// Silent auto-update check, every 30 minutes (toggleable from the panel).
+try {
+  chrome.alarms.create('ob-ota', { periodInMinutes: 30 });
+  chrome.alarms.onAlarm.addListener(async (a) => {
+    if (!a || a.name !== 'ob-ota') return;
+    try {
+      const { obOtaAuto } = await chrome.storage.local.get(['obOtaAuto']);
+      if (obOtaAuto === false) return;
+      await otaCheck(true);
     } catch (e) { /* ignore */ }
   });
 } catch (e) { /* alarms unavailable */ }

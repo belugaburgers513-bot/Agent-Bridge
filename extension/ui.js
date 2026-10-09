@@ -7,7 +7,7 @@
   if (window.OB_UI) return;
 
   const HOST_ID = 'ob-root';
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
 
   /* ----------------------------------------------------------------- bar CSS
      v1.7: ZeroScript-style composer status bar (light DOM, page-level styles —
@@ -400,7 +400,8 @@ svg{display:block;flex:none}
     multiVps: false,
     queueCount: 0,
     queuePaused: false,
-    chatVps: ''
+    chatVps: '',
+    maxTools: 6
   };
 
   let host, shadow, R; // root nodes
@@ -484,6 +485,12 @@ svg{display:block;flex:none}
             </div>
             <div class="card">
               <button class="toggle" id="apToggle"><span class="switch on" id="apSwitch"></span><span class="grow"><b>Autopilot</b><small id="apHint">Runs tool calls automatically and sends results back</small></span></button>
+              <div class="row" style="margin-top:12px;align-items:center">
+                <span class="grow" style="font-size:12.5px;line-height:1.35"><b>Tools per message</b><br><span class="muted" style="font-size:11px">Max tool calls one AI message can run (1–12)</span></span>
+                <button class="btn sm" id="mtMinus" style="width:42px;min-height:36px;padding:0;font-size:16px" aria-label="Fewer tools per message">−</button>
+                <b id="mtVal" style="min-width:30px;text-align:center;font-size:16px">6</b>
+                <button class="btn sm" id="mtPlus" style="width:42px;min-height:36px;padding:0;font-size:16px" aria-label="More tools per message">+</button>
+              </div>
             </div>
             <div class="card">
               <h4>Get started</h4>
@@ -594,8 +601,17 @@ svg{display:block;flex:none}
               <div class="small" id="wsMsg" style="margin-top:8px;min-height:18px"></div>
             </div>
             <div class="card">
+              <h4>Extension updates</h4>
+              <div class="small muted" id="otaLine">Checking…</div>
+              <div class="row" style="margin-top:10px;gap:8px">
+                <button class="btn sm primary" id="otaCheck">${icon('refresh', 15)}<span>Check now</span></button>
+              </div>
+              <button class="toggle" id="otaAutoToggle" style="margin-top:8px"><span class="switch on" id="otaAutoSwitch"></span><span class="grow"><b>Auto-update</b><small>Fetch new builds from your server and reload idle chat tabs — no reinstalling</small></span></button>
+              <div class="small muted" id="otaHint" style="margin-top:8px;min-height:14px"></div>
+            </div>
+            <div class="card">
               <h4>About</h4>
-              <div class="small muted">OrbitBridge v${VERSION} · your VPS inside AI chats — terminal, files (upload, download, zip), git, web and MCP. v1.7 ports ZeroScript's status bar: a single strip docked to the chat composer (no more floating blue button, no pill hovering over messages) with a live dot and the agent state — tap it to open this console. Tool cards now fire on DeepSeek too: while a tool runs you get a live shimmer + spinner chip on the AI's message, and every result wall folds into a tidy expandable card (page shift is compensated so nothing scrolls). v1.6.1 anchored cards on the chat turn so site re-renders can't wipe the spinner mid-run. v1.6 ports the real ZeroScript tool-card system with verified sends and automatic retries. v1.5 added the composer cover so raw tool text is never visible while the agent types. v1.4 removed the popup launcher (the toolbar button opens this panel). v1.3 auto-revives the engine after updates and added the VPS setup guide. v1.2 adds the Live tab, the in-panel service installer, true parallel tools on one VPS and prompts from .txt/.md files. Multiple VPS servers and the series queue that survives closing the browser are on board; long VPS jobs keep running with the browser closed.</div>
+              <div class="small muted">OrbitBridge v${VERSION} · your VPS inside AI chats — terminal, files (upload, download, zip), git, web and MCP. v1.8 rewrites tool-call detection: new calls are never mistaken for old ones (the “Found an earlier call” misfire), prose that merely quotes JSON can no longer trigger a run, and answered calls can never replay. You choose how many tools one AI message may run. And the extension now UPDATES ITSELF from your server (Settings → Extension updates) — after a one-time install, no more unzipping and reloading. v1.7 ports ZeroScript's status bar: a single strip docked to the chat composer (no more floating blue button, no pill hovering over messages) with a live dot and the agent state — tap it to open this console. Tool cards fire on DeepSeek too: while a tool runs you get a live shimmer + spinner chip on the AI's message, and every result wall folds into a tidy expandable card (page shift is compensated so nothing scrolls). v1.6.1 anchored cards on the chat turn so site re-renders can't wipe the spinner mid-run. v1.6 ports the real ZeroScript tool-card system with verified sends and automatic retries. v1.5 added the composer cover so raw tool text is never visible while the agent types. v1.4 removed the popup launcher (the toolbar button opens this panel). v1.3 auto-revives the engine after updates and added the VPS setup guide. v1.2 adds the Live tab, the in-panel service installer, true parallel tools on one VPS and prompts from .txt/.md files. Multiple VPS servers and the series queue that survives closing the browser are on board; long VPS jobs keep running with the browser closed.</div>
             </div>
           </div></div>
         </div>
@@ -628,11 +644,11 @@ svg{display:block;flex:none}
     shadow.appendChild(R);
 
     for (const id of ['scrim', 'sheet', 'grab', 'sub', 'pill', 'close', 'statusBox', 'ring', 'stTitle', 'stText', 'offlineBox',
-      'detCard', 'detCode', 'detSkip', 'detRun', 'apToggle', 'apSwitch', 'inject', 'copyPrompt', 'qNew', 'qOpenQueue', 'qCountLbl', 'qSaved', 'queueCard', 'qCount', 'qPause', 'qClear', 'qList', 'bgCard', 'bgRefresh', 'bgBody',
+      'detCard', 'detCode', 'detSkip', 'detRun', 'apToggle', 'apSwitch', 'mtMinus', 'mtVal', 'mtPlus', 'inject', 'copyPrompt', 'qNew', 'qOpenQueue', 'qCountLbl', 'qSaved', 'queueCard', 'qCount', 'qPause', 'qClear', 'qList', 'bgCard', 'bgRefresh', 'bgBody',
       'srvBody', 'chatVpsRow', 'chatVpsName', 'chatVpsSwitch', 'infoRefresh', 'cwd', 'termClear', 'out', 'jump', 'ask', 'askQ', 'quick', 'cmdForm', 'cmd', 'ps',
       'fUp', 'fPath', 'fUpload', 'fRefresh', 'fFile', 'fScroll', 'fList', 'viewer', 'vBack', 'vName', 'vCopy', 'vText', 'logRefresh', 'logList',
       'liveDot', 'liveReconnect', 'liveFeed', 'liveEmpty', 'instRun', 'instBar', 'instFill', 'instSteps',
-      'vpsList', 'vpsAdd', 'multiToggle', 'multiSwitch', 'connTitle', 'setUrl', 'setTok', 'tokEye', 'saveConn', 'connMsg', 'setWs', 'strictToggle', 'strictSwitch', 'saveWs', 'wsMsg', 'termBadge',
+      'vpsList', 'vpsAdd', 'multiToggle', 'multiSwitch', 'connTitle', 'setUrl', 'setTok', 'tokEye', 'saveConn', 'connMsg', 'setWs', 'strictToggle', 'strictSwitch', 'saveWs', 'wsMsg', 'termBadge', 'otaLine', 'otaCheck', 'otaAutoToggle', 'otaAutoSwitch', 'otaHint',
       'qModal', 'qpName', 'qpText', 'qpSaved', 'qpSave', 'qpQueue', 'qpSend', 'qpCancel', 'qpImport', 'qpFile', 'toast', 'tabs', 'guideToggle', 'guideBody']) {
       refs[id] = shadow.getElementById(id);
     }
@@ -683,7 +699,7 @@ svg{display:block;flex:none}
     if (tab === 'term') { pollTerminal(); refs.termBadge.classList.add('hidden'); scrollOut(true); }
     if (tab === 'files' && !S.filesLoaded) loadFiles(S.filesPath);
     if (tab === 'logs') loadLogs();
-    if (tab === 'set') { fillSettings(); loadVpsState(); }
+    if (tab === 'set') { fillSettings(); loadVpsState(); refreshOta(); }
     if (tab === 'agent') { loadInfo(); renderQueue(); if (S.online) loadBgJobs(); }
     if (tab === 'live') { startLive(); if (S.online) loadInstallState(); }
   }
@@ -1885,6 +1901,50 @@ svg{display:block;flex:none}
       const r = await api('POST', '/api/config', { workspaceRoot: refs.setWs.value.trim() || undefined, strictWorkspace: !!S.strict });
       if (r && r.success) { setMsg(refs.wsMsg, 'Saved: ' + r.workspaceRoot, 'ok'); S.filesLoaded = false; loadInfo(); } else setMsg(refs.wsMsg, (r && r.error) || 'Failed', 'err');
     });
+    initOta();
+  }
+
+  /* ---------------------------------------------------- extension OTA (v1.8) */
+  function sendBg(msg) {
+    return new Promise((resolve) => {
+      try { chrome.runtime.sendMessage(msg, (x) => { if (chrome.runtime.lastError) resolve(null); else resolve(x); }); }
+      catch (e) { resolve(null); }
+    });
+  }
+  async function refreshOta() {
+    if (!refs.otaLine) return;
+    const r = await sendBg({ type: 'OTA_STATUS' });
+    if (!r || !r.success) { refs.otaLine.textContent = 'Unavailable outside the extension context.'; return; }
+    const running = window.__OB_OTA_VERSION || null; // set by the auto-updated core
+    refs.otaLine.textContent = `Installed v${r.installed}` + (r.ota && r.ota !== r.installed ? ` · running auto-updated v${r.ota}` : '');
+    const st = r.state || {};
+    if (st.status === 'blocked') {
+      refs.otaHint.textContent = 'Auto-injection is blocked by the browser: open chrome://extensions → OrbitBridge → Details → enable “Allow user scripts” (or Developer mode), then tap Check now. Until then the bundled engine runs.';
+    } else if (st.status === 'error') {
+      refs.otaHint.textContent = 'Last check failed: ' + (st.reason || st.error || 'unknown');
+    } else {
+      refs.otaHint.textContent = '';
+    }
+    refs.otaAutoSwitch.classList.toggle('on', !!r.auto);
+    if (running) refs.otaLine.textContent += ' (live)';
+  }
+  function initOta() {
+    if (!refs.otaCheck) return;
+    refs.otaCheck.addEventListener('click', async () => {
+      toast('Checking for updates…');
+      const r = await sendBg({ type: 'CHECK_OTA' });
+      if (!r) { toast('Could not reach the update service'); return; }
+      if (r.status === 'updated') toast(r.registered ? `Updated to v${r.version} — reloading idle chat tabs` : `Downloaded v${r.version}`);
+      else if (r.status === 'current') toast(`Up to date (v${r.version || r.installed})`);
+      else toast(r.error || 'Update check failed');
+      refreshOta();
+    });
+    refs.otaAutoToggle.addEventListener('click', async () => {
+      const next = !refs.otaAutoSwitch.classList.contains('on');
+      refs.otaAutoSwitch.classList.toggle('on', next);
+      await new Promise((res) => { try { chrome.storage.local.set({ obOtaAuto: next }, res); } catch (e) { res(); } });
+      toast(next ? 'Auto-update on — checks every 30 min' : 'Auto-update off');
+    });
   }
   function setMsg(node, text, kind) {
     node.textContent = text;
@@ -1894,6 +1954,22 @@ svg{display:block;flex:none}
   /* ----------------------------------------------------------------- agent */
   function renderAutopilot() {
     refs.apSwitch.classList.toggle('on', S.autopilot);
+  }
+
+  /* ---- v1.8 tools-per-message stepper (Agent tab) ---- */
+  function renderMt() { if (refs.mtVal) refs.mtVal.textContent = String(S.maxTools); }
+  async function loadMaxTools() {
+    const r = await new Promise((res) => {
+      try { chrome.storage.local.get(['obMaxTools'], (x) => res(x && x.obMaxTools)); } catch (e) { res(null); }
+    });
+    S.maxTools = Math.max(1, Math.min(12, Number(r) || 6));
+    renderMt();
+  }
+  async function stepMaxTools(d) {
+    S.maxTools = Math.max(1, Math.min(12, S.maxTools + d));
+    renderMt();
+    await new Promise((res) => { try { chrome.storage.local.set({ obMaxTools: S.maxTools }, res); } catch (e) { res(); } });
+    toast(`Up to ${S.maxTools} tool call${S.maxTools > 1 ? 's' : ''} per AI message`);
   }
 
   function renderDetected() {
@@ -1911,6 +1987,9 @@ svg{display:block;flex:none}
       renderAutopilot();
       S.handlers.onAutopilot && S.handlers.onAutopilot(S.autopilot);
     });
+    refs.mtMinus.addEventListener('click', () => stepMaxTools(-1));
+    refs.mtPlus.addEventListener('click', () => stepMaxTools(1));
+    loadMaxTools();
     refs.inject.addEventListener('click', () => S.handlers.onInjectPrompt && S.handlers.onInjectPrompt());
     refs.copyPrompt.addEventListener('click', () => S.handlers.onCopyPrompt && S.handlers.onCopyPrompt());
     refs.detRun.addEventListener('click', () => S.handlers.onRunDetected && S.handlers.onRunDetected());
