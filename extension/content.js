@@ -1032,20 +1032,46 @@
     } catch (e) { /* ignore */ }
   }
 
+  const isVisible = (n) => { try { return !!n && (n.offsetParent !== null || getComputedStyle(n).position === 'fixed'); } catch (e) { return true; } };
+  // A real "stop generating" glyph is a LONE square. Icons that merely contain a <rect> (attach,
+  // microphone, grid, settings...) also carry paths/circles — they used to read as "Stop", which
+  // made isGenerating() permanently true and froze tool calls.
+  function isStopSquare(rect) {
+    try {
+      const svg = rect.closest('svg');
+      return !!svg && svg.querySelectorAll('rect').length === 1 &&
+        svg.querySelectorAll('path, circle, line, polyline, polygon, ellipse').length === 0;
+    } catch (e) { return false; }
+  }
+
   function isGenerating() {
     const stop = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[title*="Stop" i], div[role="button"][aria-label*="Stop" i], button[aria-label*="停止"], [class*="stop-button" i]');
-    if (stop && !inPanel(stop)) return true;
+    if (stop && !inPanel(stop) && isVisible(stop)) return true;
     const input = getChatInput();
     if (input) {
       let parent = input.parentElement;
       for (let i = 0; i < 6 && parent; i++) {
-        const rect = parent.querySelector('button svg rect, div[role="button"] svg rect');
-        if (rect && !inPanel(rect)) return true;
+        for (const rect of parent.querySelectorAll('button svg rect, div[role="button"] svg rect')) {
+          if (inPanel(rect) || !isStopSquare(rect)) continue;
+          if (isVisible(rect.closest('button, [role="button"]'))) return true;
+        }
         parent = parent.parentElement;
       }
     }
-    const streaming = document.querySelector('.ds-loading, [class*="streaming" i], [class*="cursor-blink" i]');
-    return !!(streaming && !inPanel(streaming));
+    // streaming markers count only on the LATEST assistant reply (a stray class elsewhere on the
+    // page — or on an old message — must not mean "still generating")
+    const live = '.ds-loading, [class*="streaming" i], [class*="cursor-blink" i]';
+    try {
+      const dl = document.querySelector('.ds-loading');
+      if (dl && !inPanel(dl) && isVisible(dl)) return true;
+      const turns = assistantTurnsList().filter((t) => !turnIsUser(t));
+      const last = turns[turns.length - 1];
+      if (last) {
+        const hit = last.matches(live) ? last : last.querySelector(live);
+        if (hit && !inPanel(hit) && isVisible(hit)) return true;
+      }
+    } catch (e) { /* unreadable DOM → not generating */ }
+    return false;
   }
 
   /* ------------------------------------------------------- tool parsing */
@@ -1068,12 +1094,47 @@
     } catch (e) { return null; }
   }
 
+  // Every tool the bridge serves (server /api/tools). A bare, unfenced JSON object may omit
+  // "params" only when its tool id is one of these — that keeps prose that merely quotes JSON
+  // from running, while still catching no-argument calls like {"tool":"get_server_info"}.
+  const KNOWN_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'list_dir', 'make_dir', 'delete_file', 'file_exists',
+    'batch_write_files', 'search_files', 'zip_files', 'unzip_file', 'move_path', 'copy_path', 'fetch_web_url',
+    'terminal_exec', 'run_command', 'parallel_commands', 'terminal_input', 'terminal_kill',
+    'start_background', 'list_background', 'tail_log', 'stop_background',
+    'get_server_info', 'get_system_info', 'check_port', 'kill_port', 'git_status', 'git_diff', 'git_log',
+    'mcp_list', 'mcp_call']);
+  const ARG_KEYS = ['params', 'parameters', 'arguments', 'args', 'input'];
+  const TOOL_ID_RE = /^[a-z][a-z0-9_.-]*$/i;
+  const CALL_KEY_RE = /"(?:tool|tool_name|toolName|name|function)"\s*:/;
+
+  function parseArgs(v) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+    if (typeof v === 'string' && v.trim()) { // models often send "arguments" as a JSON string
+      const q = safeJsonParse(v.trim());
+      if (q && typeof q === 'object' && !Array.isArray(q)) return q;
+    }
+    return {};
+  }
+
+  // v1.8.2: accepts {tool,params} (the documented shape) AND the shapes models drift to:
+  // {tool,arguments|parameters|args|input}, {name,arguments} and OpenAI {function:{name,arguments}}.
+  // "name" alone is NOT enough (a package.json shown in a code block has a "name") — it needs an
+  // argument key or a known tool id.
   function normalizeCall(p) {
     if (!p || typeof p !== 'object') return null;
     if (Array.isArray(p)) return p.map(normalizeCall).filter(Boolean);
-    if (typeof p.tool === 'string' && p.tool.trim()) return { tool: p.tool.trim(), params: (p.params && typeof p.params === 'object') ? p.params : {} };
-    if (typeof p.name === 'string' && p.name.trim()) return { tool: p.name.trim(), params: (p.params || p.arguments || {}) };
-    return null;
+    let o = p;
+    if (o.function && typeof o.function === 'object' && !Array.isArray(o.function)) o = o.function; // OpenAI style
+    const hasArgs = ARG_KEYS.some((k) => k in o);
+    let name = null;
+    for (const k of ['tool', 'tool_name', 'toolName']) {
+      if (typeof o[k] === 'string' && o[k].trim()) { name = o[k].trim(); break; }
+    }
+    if (!name && typeof o.name === 'string' && o.name.trim() && (hasArgs || KNOWN_TOOLS.has(o.name.trim()))) name = o.name.trim();
+    if (!name || !TOOL_ID_RE.test(name)) return null;
+    let params = {};
+    for (const k of ARG_KEYS) { if (k in o) { params = parseArgs(o[k]); break; } }
+    return { tool: name, params, _explicit: hasArgs };
   }
 
   /** Extract EVERY tool call in a message. v1.8 rework:
@@ -1094,26 +1155,40 @@
     else if (text.includes('<think>')) return [];
 
     const calls = [];
+    const strip = (c) => ({ tool: c.tool, params: c.params });
     const push = (p) => {
       for (const c of [].concat(normalizeCall(p) || [])) {
-        if (c && calls.length < cap) calls.push(c);
+        if (c && calls.length < cap) calls.push(strip(c));
       }
     };
 
-    // 1) fenced ```tool / ```json blocks (each may hold one object or an array)
-    const fences = text.matchAll(/```(?:tool|json)?\s*\n?([\s\S]*?)```/gi);
+    // 1) fenced blocks with ANY language label (```tool, ```json, ```bash ... — models are not
+    //    consistent). Each may hold one object or an array. Only blocks that LOOK like JSON count.
+    const fences = text.matchAll(/```[ \t]*([A-Za-z0-9_+.-]*)[ \t]*\r?\n?([\s\S]*?)```/g);
     for (const f of fences) {
-      const parsed = safeJsonParse(f[1].trim());
+      const body = f[2].trim();
+      if (!body || (body[0] !== '{' && body[0] !== '[')) continue;
+      const parsed = safeJsonParse(body);
       if (parsed) push(parsed);
     }
     if (calls.length) return calls;
 
-    // 2) bare JSON, STRICT (v1.8): opening { must start a line, closing } must
-    // end its line, "tool" AND "params" keys required.
-    const openRe = /(^|\n)[ \t]*\{/g;
+    // 2) bare JSON (what rendered chat pages give us — the fences are gone), STRICT: a top-level
+    //    object OR array must start a line and end its line, and must be a real call:
+    //    an explicit args key, or a known tool id (so no-argument calls still work).
+    //    v1.8.2: ARRAYS are supported — the prompt tells the AI to batch calls as a JSON array, and
+    //    the old object-only scanner dropped every element that ended in "," (a pretty-printed
+    //    batch ran only its LAST call; a one-line batch ran nothing).
+    const bare = (it) => {
+      if (!it || typeof it !== 'object' || Array.isArray(it)) return null;
+      const c = normalizeCall(it);
+      return c && (c._explicit || KNOWN_TOOLS.has(c.tool)) ? c : null;
+    };
+    const openRe = /(^|\n)[ \t]*([{\[])/g;
     let m;
     while (calls.length < cap && (m = openRe.exec(text))) {
-      const open = m.index + m[0].length - 1; // the '{'
+      const open = m.index + m[0].length - 1; // the '{' or '['
+      const oc = text[open], cc = oc === '{' ? '}' : ']';
       let depth = 0, close = -1, inStr = false, esc = false;
       for (let i = open; i < text.length; i++) {
         const ch = text[i];
@@ -1121,19 +1196,23 @@
         if (ch === '\\') { esc = true; continue; }
         if (ch === '"') { inStr = !inStr; continue; }
         if (!inStr) {
-          if (ch === '{') depth++;
-          else if (ch === '}') { depth--; if (depth === 0) { close = i; break; } }
+          if (ch === oc) depth++;
+          else if (ch === cc) { depth--; if (depth === 0) { close = i; break; } }
         }
       }
       if (close === -1) break;
-      // closing brace must be line-final (whitespace up to \n or EOF)
+      // closing bracket must be line-final (whitespace up to \n or EOF)
       let j = close + 1;
       while (j < text.length && (text[j] === ' ' || text[j] === '\t')) j++;
       if (j < text.length && text[j] !== '\n' && text[j] !== '\r') { openRe.lastIndex = close + 1; continue; }
       const body = text.slice(open, close + 1);
-      if (!/"params"\s*:/.test(body) || !/"tool"\s*:/.test(body)) { openRe.lastIndex = close + 1; continue; }
+      if (!CALL_KEY_RE.test(body)) { openRe.lastIndex = close + 1; continue; }
       const parsed = safeJsonParse(body);
-      if (parsed && typeof parsed.tool === 'string' && /^[a-z][a-z0-9_.-]*$/i.test(parsed.tool.trim())) push(parsed);
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      const norm = items.map(bare);
+      // an array is a batch only when EVERY element is a call (a data array that merely
+      // contains one object with a "name" must not run anything)
+      if (norm.length && norm.every(Boolean)) norm.forEach((c) => { if (calls.length < cap) calls.push(strip(c)); });
       openRe.lastIndex = close + 1;
     }
     return calls;
@@ -1469,6 +1548,17 @@
   // v1.6.1: the dedup key is CONTENT (tool + params + message prefix), not the
   // message's DOM index — the index shifts every time a new message lands,
   // which let an already-run call re-execute (double runs).
+  // Which assistant reply this is (0,1,2...). The signature used to be content-only, so two
+  // different replies that start with the same sentence and make the SAME call (very common:
+  // "Let me check." + ls / git status / pm2 logs) collided and the second one never ran.
+  function turnOrdinal(turn) {
+    try {
+      if (!turn) return 'x';
+      const list = assistantTurnsList().filter((t) => !turnIsUser(t));
+      const i = list.indexOf(turn);
+      return i === -1 ? 'x' : String(i);
+    } catch (e) { return 'x'; }
+  }
   function callSig(container, call, cleanText) {
     // cleanText = the extraction text (no chips / think blocks / hidden raw calls):
     // raw textContent would change the moment OUR chip lands in the message and
@@ -1598,13 +1688,16 @@
       if (batch.length >= maxTools) break;
       if (el.getAttribute('data-ob-handled') === 'true' || el.getAttribute('data-ob-container-handled') === 'true') continue;
       if (el.closest('[data-ob-container-handled="true"]')) continue;
-      if (el.closest(THINK_SEL) || el.closest(USER_SEL)) continue;
+      // v1.8.2: only skip when the candidate ITSELF is a thinking/user block. Matching an ANCESTOR
+      // (a page wrapper whose class merely contains "think", e.g. DeepThink mode) made the engine
+      // ignore every message in the chat.
+      if (TURNS.assistant ? (el.matches(THINK_SEL) || el.matches(USER_SEL)) : (el.closest(THINK_SEL) || el.closest(USER_SEL))) continue;
 
       const turn = assistantTurnOf(el);
       try { if (turn && turnIsUser(turn)) continue; } catch (e) { /* keep going */ }
 
       const text = containerCallText(el);
-      if (!text || text.indexOf('"tool"') === -1) continue;
+      if (!text || !CALL_KEY_RE.test(text)) continue;
 
       // ---- v1.8 history gates (decided per TURN, stable across re-renders) ----
       if (turn && wallDoneTurns.has(turn)) continue;
@@ -1648,7 +1741,7 @@
         const k = call.tool + '|' + JSON.stringify(call.params || {});
         const occ = seen.get(k) || 0;
         seen.set(k, occ + 1);
-        const sig = callSig(el, call, text) + '#' + occ;
+        const sig = turnOrdinal(turn) + '|' + callSig(el, call, text) + '#' + occ;
         if (executed.has(sig)) continue;
         executed.add(sig);
         batch.push({ call, el, sig });
@@ -1657,9 +1750,14 @@
 
     if (batch.length) {
       if (isGenerating()) {
-        // Model is still writing; un-claim so the next scan can pick it up.
-        batch.forEach((b) => executed.delete(b.sig));
-        return;
+        // Model is still writing; un-claim so the next scan can pick it up — UNLESS the message
+        // has not changed for 12s: then the "generating" signal is stuck (a site class / icon that
+        // merely looks like a stop button) and waiting forever would swallow the call.
+        const frozen = batch.every((b) => { const st = stable.get(b.el); return st && now - st.since > 12000; });
+        if (!frozen) {
+          batch.forEach((b) => executed.delete(b.sig));
+          return;
+        }
       }
       executeBatch(batch.map((b) => b.call), batch.map((b) => b.el));
     }

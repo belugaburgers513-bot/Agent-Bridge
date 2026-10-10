@@ -1,5 +1,21 @@
 # Changelog
 
+## OrbitBridge v1.8.3 (2026-10-11)
+
+Tool-call detection release: fixes "the AI called the tool but OrbitBridge didn't see it".
+
+### Fixed — detection
+
+- **Batch arrays** (`[{...},{...}]`) and calls with no `params` are detected.
+- **Other call shapes** models drift to: `{"name","arguments"}` (object or JSON string),
+  `parameters`, `args`, `input`, `tool_name`, and OpenAI-style `function` wrappers.
+- **Fence labels** (```tool, ```json, ```jsonc, none) all work; JSON quoted in prose or
+  config files (e.g. package.json) still does not run.
+- **Stuck "generating" signals**: attach icons that look like a Stop square, leftover
+  "streaming" classes and "think" wrapper classes no longer block calls; a frozen message
+  runs after 12s even if the site still shows a Stop button.
+- **Repeated identical reply** in a later turn is no longer swallowed by dedup.
+
 ## OrbitBridge v1.8.2 (2026-10-10)
 
 Bug-fix and polish release: the panel, the terminal, the Live feed and the engine.

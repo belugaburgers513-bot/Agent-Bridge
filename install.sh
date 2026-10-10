@@ -16,7 +16,7 @@
 # ============================================================================
 set -u
 
-VERSION="1.8.2"
+VERSION="1.8.3"
 REPO="belugaburgers513-bot/Agent-Bridge"
 DL_BASE="https://github.com/${REPO}/releases/latest/download"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
