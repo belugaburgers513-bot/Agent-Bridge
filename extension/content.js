@@ -45,14 +45,48 @@
   // timestamp, an orphaned one stores the literal string 'stale'. The background
   // reviver re-injects unless it sees a fresh timestamp.
   window.__obBeat = (function () { try { return chrome.runtime.id ? Date.now() : 'stale'; } catch (e) { return 'stale'; } })();
-  setInterval(() => {
-    if (superseded()) return; // a fresh engine owns this page now
+  const beatTimer = setInterval(() => {
+    if (superseded()) { if (window.__obEngine) clearInterval(beatTimer); return; } // a fresh engine owns this page now (undefined = not claimed yet: keep beating)
     try { window.__obBeat = chrome.runtime.id ? Date.now() : 'stale'; }
     catch (e) { window.__obBeat = 'stale'; }
   }, 1500);
 
   const alive = () => { try { return typeof chrome !== 'undefined' && !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Registry of every long-lived timer/observer this engine starts. When a fresh
+  // engine takes over the page (or the extension is reloaded) the old one tears
+  // all of it down instead of idling forever (leaked intervals + observers).
+  const liveTimers = new Set();
+  const liveObservers = [];
+  function teardown() {
+    liveTimers.forEach((id) => clearInterval(id));
+    liveTimers.clear();
+    liveObservers.splice(0).forEach((mo) => { try { mo.disconnect(); } catch (e) { /* ignore */ } });
+    try { stopKeepAlive(); } catch (e) { /* ignore */ }
+    try { cancelAnimationFrame(coverState.raf); coverState.on = false; if (coverState.el) coverState.el.remove(); coverState.el = null; } catch (e) { /* ignore */ }
+    try { kbRestoreIm(); } catch (e) { /* ignore */ }
+  }
+  function every(fn, ms) {
+    const id = setInterval(() => {
+      if (superseded()) { teardown(); return; }
+      try {
+        const r = fn();
+        if (r && typeof r.catch === 'function') r.catch(() => { /* never an unhandled rejection from a poller */ });
+      } catch (e) { /* a poller must never die on a site DOM surprise */ }
+    }, ms);
+    liveTimers.add(id);
+    return id;
+  }
+  function observe(cb, opts) {
+    const mo = new MutationObserver(() => {
+      if (superseded()) { teardown(); return; }
+      try { cb(); } catch (e) { /* ignore */ }
+    });
+    mo.observe(document.body, opts);
+    liveObservers.push(mo);
+    return mo;
+  }
 
   /* ------------------------------------------------------------ storage */
   const store = {
@@ -76,7 +110,7 @@
   let lastDetected = null; // { toolCall, el }
   let bootUntil = Date.now() + 3500; // boot calm-down window (history is classified by turn snapshots, not by swallowing calls)
   let maxTools = 6; // v1.8: user-configurable cap of tool calls per AI message (1..12)
-  let lastHref = location.href;
+  let lastHref = location.pathname + location.search; // chatKey() — declared before it, same shape
   let serverOnline = false;
   let keepAliveTimer = null;
   let profilesCache = []; // [{id,name,url,token}]
@@ -218,7 +252,8 @@
           const lines = text.split('\n');
           for (let i = 0; i < lines.length; i++) {
             const block = document.createElement('p');
-            block.textContent = lines[i];
+            if (lines[i]) block.textContent = lines[i];
+            else block.appendChild(document.createElement('br')); // empty line: an empty <p> collapses and the blank line is lost
             input.appendChild(block);
           }
         } else {
@@ -320,7 +355,7 @@
      site wipes gets re-applied by the sweep. === */
 
   const COVER_Z = 2147483500;
-  const coverState = { el: null, raf: 0, on: false, shownAt: 0, minMs: 450 };
+  const coverState = { el: null, raf: 0, on: false, shownAt: 0, minMs: 450, offTimer: 0, bg: '', bgAt: 0, maxMs: 120000 };
 
   /* ================= v1.9 KEYBOARD GUARD. The on-screen keyboard used to pop up
      every time OrbitBridge typed a tool result into the chat and sent it. The
@@ -526,6 +561,8 @@
 
   function coverPlace() {
     if (!coverState.on || !coverState.el) return;
+    // Watchdog: a send path that threw / hung must never leave the composer covered.
+    if (superseded() || Date.now() - coverState.shownAt > coverState.maxMs) { coverOff(true); return; }
     const ed = getChatInput();
     if (!ed) { coverState.raf = requestAnimationFrame(coverPlace); return; }
     if (!ed.classList.contains('ob-typing')) ed.classList.add('ob-typing'); // editors get recreated by SPAs
@@ -546,7 +583,10 @@
     coverState.el.style.top = (cy - h / 2) + 'px';
     coverState.el.style.width = r.width + 'px';
     coverState.el.style.height = h + 'px';
-    coverState.el.style.background = opaqueBg(ed);
+    // the blended colour only changes on theme flips: re-probe twice a second, not every frame
+    const nowMs = Date.now();
+    if (!coverState.bg || nowMs - coverState.bgAt > 500) { coverState.bg = opaqueBg(ed); coverState.bgAt = nowMs; }
+    if (coverState.el.style.background !== coverState.bg) coverState.el.style.background = coverState.bg;
     coverState.raf = requestAnimationFrame(coverPlace);
   }
 
@@ -564,7 +604,8 @@
         coverState.el = d;
       }
       if (label) coverState.el.querySelector('.obcv-tx').textContent = label;
-      coverState.on = true; coverState.shownAt = Date.now();
+      clearTimeout(coverState.offTimer); // a pending hide from the previous send must not kill this cover
+      coverState.on = true; coverState.shownAt = Date.now(); coverState.bg = '';
       coverState.el.style.display = 'flex';
       requestAnimationFrame(() => { if (coverState.el) coverState.el.classList.add('on'); });
       cancelAnimationFrame(coverState.raf);
@@ -572,12 +613,14 @@
     } catch (e) { /* never block a send on cosmetics */ }
   }
 
-  function coverOff() {
+  function coverOff(now) {
     if (!coverState.on) return;
     coverState.on = false;
     cancelAnimationFrame(coverState.raf);
-    const wait = Math.max(0, coverState.minMs - (Date.now() - coverState.shownAt));
-    setTimeout(() => {
+    const wait = now ? 0 : Math.max(0, coverState.minMs - (Date.now() - coverState.shownAt));
+    clearTimeout(coverState.offTimer);
+    coverState.offTimer = setTimeout(() => {
+      if (coverState.on) return; // a newer coverOn took over
       try {
         if (coverState.el) { coverState.el.classList.remove('on'); coverState.el.style.display = 'none'; }
         const ed = getChatInput();
@@ -603,7 +646,26 @@
 
   // One primitive for EVERY automated send: cover the composer, type, click,
   // verify, retry up to 3 times. Sets the awaiting-response bookkeeping.
-  async function typeAndSend(text, opts = {}) {
+  // Every automated send (tool results, queue, quick-send, resume, rate-limit
+  // resend) goes through ONE lane: two concurrent sends would both write the
+  // same composer and the second would clobber (or double-send) the first.
+  let sendLane = Promise.resolve();
+  function typeAndSend(text, opts) {
+    const run = sendLane.then(() => typeAndSendNow(text, opts || {}));
+    sendLane = run.catch(() => false);
+    return run;
+  }
+
+  async function typeAndSendNow(text, opts = {}) {
+    try {
+      return await typeAndSendInner(text, opts);
+    } catch (e) {
+      coverOff(); // an exception mid-send must never leave the composer covered
+      return false;
+    }
+  }
+
+  async function typeAndSendInner(text, opts = {}) {
     const maxTry = opts.retries === undefined ? 3 : opts.retries;
     kbHold(); // keyboard guard up BEFORE we touch the composer
     for (let attempt = 1; attempt <= maxTry; attempt++) {
@@ -826,11 +888,26 @@
     } catch (e) { runChip = null; runHost = null; runOpts = null; }
   }
 
+  // v1.8.2: live elapsed time on the running chip ("running… 12s"). Touches ONLY the
+  // detail text — never rebuilds the chip — so the spinner/shimmer is not restarted.
+  function tickRunChip() {
+    try {
+      if (!runHost || !runOpts || !runHost.isConnected) return;
+      const chip = runHost.querySelector(':scope > .ob-chip.run');
+      if (!chip) return;
+      const secs = Math.floor((Date.now() - runStartedAt) / 1000);
+      const txt = secs >= 2 ? 'running… ' + secs + 's' : 'running…';
+      runOpts.detail = txt;
+      const dt = chip.querySelector('.ob-chip-dt');
+      if (dt && dt.textContent !== txt) dt.textContent = txt;
+    } catch (e) { /* cosmetic */ }
+  }
+
   function endRunChip(pairs) {
     try {
       if (runHost && runHost.isConnected) {
         const dur = ((Date.now() - runStartedAt) / 1000).toFixed(1);
-        const bad = pairs.filter((p) => !p.res || !p.res.success).length;
+        const bad = pairs.filter((p) => !p.res || !p.res.success || (p.res.result && p.res.result.timedOut)).length;
         const opts = {
           label: pairs.length > 1 ? pairs.length + ' tools in parallel' : ((pairs[0].call && pairs[0].call.tool) || 'tool'),
           detail: (bad ? 'failed in ' : 'done in ') + dur + 's',
@@ -928,13 +1005,14 @@
     try {
       ensurePageStyles();
       applyChipTheme();
-      const mo = new MutationObserver(() => { if (!superseded()) chipPending = true; });
       // characterData too: some sites stream the result wall INTO an existing
       // text node (no childList mutation) — without this the sweep would sleep.
-      mo.observe(document.body, { childList: true, subtree: true, characterData: true });
-      setInterval(() => {
-        if (superseded() || document.hidden) return; // v1.6.1: no work in background tabs
+      observe(() => { chipPending = true; }, { childList: true, subtree: true, characterData: true });
+      every(() => {
+        if (document.hidden) return; // v1.6.1: no work in background tabs
+        ensurePageStyles(); // a site (or SPA nav) may have dropped our <style>
         applyChipTheme();
+        tickRunChip();
         if (chipPending) { chipPending = false; sweepChipsFrom(document.body); }
         // v1.6.1: keep OUR decorations alive across site re-renders.
         try {
@@ -1064,8 +1142,9 @@
   /* ------------------------------------------------------------ results */
   const MAX_RESULT_CHARS = 28000;
 
-  function formatToolResult(res, originalTool, attempt = 1) {
-    const name = res.tool || originalTool?.tool || 'tool';
+  function formatToolResult(res, originalTool, attempt = 1, maxChars) {
+    res = res || {};
+    const name = res.tool || (originalTool && originalTool.tool) || 'tool';
     const nonce = Math.random().toString(36).slice(2, 6).toUpperCase();
     let header = `[TOOL_RESULT: ${name}]`;
     if (res.vps) header += ` (vps: ${res.vps})`;
@@ -1096,7 +1175,13 @@
       body = 'Status: SUCCESS\n' + JSON.stringify(r === undefined ? res : r, null, 1);
     }
     let text = `${header}\n${body}`;
-    if (text.length > MAX_RESULT_CHARS) text = text.slice(0, MAX_RESULT_CHARS) + '\n...[truncated to fit the chat box]';
+    const cap = maxChars || MAX_RESULT_CHARS;
+    if (text.length > cap) {
+      // keep the head (header + status) AND the tail: the end of terminal output
+      // (errors, final lines) is usually the part that matters
+      const tail = Math.floor(cap * 0.3);
+      text = text.slice(0, cap - tail) + `\n...[truncated ${text.length - cap} chars to fit the chat box]...\n` + text.slice(text.length - tail);
+    }
     if (attempt > 1) text += `\n\n<!-- nonce ${nonce}-${Date.now()} -->`;
     return text;
   }
@@ -1104,7 +1189,9 @@
   function formatBatchResults(pairs, attempt = 1) {
     // pairs: [{ call, res }] in original order
     if (pairs.length === 1) return formatToolResult(pairs[0].res, pairs[0].call, attempt);
-    const parts = pairs.map((p, i) => `[${i + 1}/${pairs.length}] ` + formatToolResult(p.res, p.call, 1));
+    // one shared budget for the whole message (N x 28k would overflow the composer)
+    const each = Math.max(3500, Math.floor(MAX_RESULT_CHARS / pairs.length));
+    const parts = pairs.map((p, i) => `[${i + 1}/${pairs.length}] ` + formatToolResult(p.res, p.call, 1, each));
     let text = parts.join('\n\n');
     if (attempt > 1) text += `\n\n<!-- resend ${attempt} ${Date.now()} -->`;
     return text;
@@ -1147,6 +1234,7 @@
     for (let i = nodes.length - 1; i >= Math.max(0, nodes.length - 80); i--) {
       const n = nodes[i];
       if (inPanel(n) || n.children.length > 2) continue;
+      if (n.closest(MD_SEL) || isAssistantText(n)) continue; // the AI merely writing "try again later" is not a rate limit
       const t = (n.textContent || '').toLowerCase().trim();
       if (t.length < 160 && phrases.some((p) => t.includes(p))) return n;
     }
@@ -1175,15 +1263,19 @@
     const iv = setInterval(() => { secs--; if (secs > 0) { UI.setActivity(`Rate limited. Retrying in ${secs}s (${rateRetries}/4)…`, 'thinking', true); UI.setStatus('thinking', `Wait ${secs}s`); } else clearInterval(iv); }, 1000);
     setTimeout(async () => {
       clearInterval(iv);
-      const retry = findRetryButton();
-      if (retry && rateRetries === 1) {
-        retry.click();
-        await sleep(2200);
-        retrying = false;
-        if (detectRateLimit()) await resendVaried();
-        return;
-      }
-      await resendVaried();
+      try {
+        if (superseded()) return;
+        const retry = findRetryButton();
+        if (retry && rateRetries === 1) {
+          retry.click();
+          await sleep(2200);
+          retrying = false;
+          if (detectRateLimit()) await resendVaried();
+          return;
+        }
+        await resendVaried();
+      } catch (e) { /* fall through to the reset below */ }
+      retrying = false;
     }, secs * 1000);
   }
 
@@ -1192,8 +1284,8 @@
     const text = lastResult.pairs && lastResult.pairs.length > 1
       ? formatBatchResults(lastResult.pairs, rateRetries + 1)
       : formatToolResult(lastResult.pairs ? lastResult.pairs[0].res : { success: false }, lastResult.pairs ? lastResult.pairs[0].call : null, rateRetries + 1);
-    await typeAndSend(text, { label: 'Resending…', retries: 2 });
-    retrying = false;
+    try { await typeAndSend(text, { label: 'Resending…', retries: 2 }); }
+    finally { retrying = false; }
     UI.setActivity('Resent. Waiting for the AI…', 'thinking', true);
     UI.setStatus('thinking', 'Waiting');
   }
@@ -1264,6 +1356,17 @@
 
   async function executeBatch(calls, els) {
     if (superseded() || activeExecution || !calls.length) return;
+    try { await executeBatchInner(calls, els); }
+    catch (e) {
+      // anything unexpected (UI.confirm threw, a chip crashed...) must not leave the engine wedged
+      if (activeExecution) {
+        const pairs = calls.map((c) => ({ call: c, res: { success: false, tool: c.tool, error: 'Internal error: ' + String(e && e.message || e) } }));
+        try { await finishBatch(pairs, els); } catch (e2) { activeExecution = false; stopKeepAlive(); }
+      }
+    }
+  }
+
+  async function executeBatchInner(calls, els) {
     activeExecution = true;
     startKeepAlive();
     (els || []).forEach((el) => {
@@ -1328,6 +1431,7 @@
     stopKeepAlive();
     endRunChip(pairs);
     const failed = pairs.filter((p) => !p.res || !p.res.success).length;
+    rateRetries = 0;
     if (pairs.length > 1) {
       UI.setActivity(`${pairs.length - failed}/${pairs.length} parallel calls finished`, failed ? 'error' : 'success', false);
     } else {
@@ -1335,11 +1439,16 @@
       if (r && r.success) UI.setActivity(`${pairs[0].call.tool} finished (${r.durationMs || 0}ms)`, 'success', false);
       else UI.setActivity(`${pairs[0].call.tool} failed: ${(r && r.error) || 'server error'}`, 'error', false);
     }
-    UI.notifyExecuted();
-    const text = formatBatchResults(pairs, 1);
-    lastResult = { text, pairs };
-    await sendTextToChat(text, { chip: chipInfoFromPairs(pairs) });
-    processQueue('after-batch');
+    try { UI.notifyExecuted(); } catch (e) { /* cosmetic */ }
+    try {
+      const text = formatBatchResults(pairs, 1);
+      lastResult = { text, pairs };
+      await sendTextToChat(text, { chip: chipInfoFromPairs(pairs) });
+    } catch (e) {
+      coverOff();
+      UI.setActivity('Could not send the result: ' + String(e && e.message || e), 'error', false);
+    }
+    processQueue('after-batch').catch(() => { /* ignore */ });
   }
 
   /* --------------------------------------------------------- scanning */
@@ -1360,8 +1469,11 @@
   // v1.6.1: the dedup key is CONTENT (tool + params + message prefix), not the
   // message's DOM index — the index shifts every time a new message lands,
   // which let an already-run call re-execute (double runs).
-  function callSig(container, call) {
-    const prefix = ((container && container.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  function callSig(container, call, cleanText) {
+    // cleanText = the extraction text (no chips / think blocks / hidden raw calls):
+    // raw textContent would change the moment OUR chip lands in the message and
+    // let a re-created node re-run the same call under a different signature.
+    const prefix = (cleanText != null ? cleanText : ((container && container.textContent) || '')).replace(/\s+/g, ' ').trim().slice(0, 100);
     return call.tool + ':' + JSON.stringify(call.params || {}) + ':' + prefix;
   }
 
@@ -1536,7 +1648,7 @@
         const k = call.tool + '|' + JSON.stringify(call.params || {});
         const occ = seen.get(k) || 0;
         seen.set(k, occ + 1);
-        const sig = callSig(el, call) + '#' + occ;
+        const sig = callSig(el, call, text) + '#' + occ;
         if (executed.has(sig)) continue;
         executed.add(sig);
         batch.push({ call, el, sig });
@@ -1577,14 +1689,14 @@
     const generating = isGenerating();
     if (generating) {
       if (!isThinking) {
-        isThinking = true; awaitingResponse = false;
+        isThinking = true; awaitingResponse = false; rateRetries = 0; // a reply started: the site accepted us, so the retry budget resets
         UI.setActivity('The AI is replying…', 'thinking', true);
         UI.setStatus('thinking', 'Thinking');
       }
     } else if (isThinking) {
       isThinking = false; awaitingResponse = false;
       handleGenerationCompleted();
-    } else if (awaitingResponse && Date.now() - awaitingSince > 3000) {
+    } else if (awaitingResponse && Date.now() - awaitingSince > 6000) { // 3s was too short on slow starts: "Ready" + queue fired before the reply began
       awaitingResponse = false;
       handleGenerationCompleted();
     }
@@ -1616,7 +1728,7 @@
 
   function agentIdleForQueue() {
     if (Date.now() < bootUntil) return false;
-    if (activeExecution || isGenerating() || retrying || lastDetected) return false;
+    if (activeExecution || awaitingResponse || isGenerating() || retrying || lastDetected) return false;
     if (Date.now() - lastSubmit < 3500) return false;
     if (!serverOnline) return false;
     return true;
@@ -1634,13 +1746,16 @@
       if (first.claim && first.claim.tab !== TAB_TOKEN && Date.now() - first.claim.at < 20000) return;
       first.claim = { tab: TAB_TOKEN, at: Date.now() };
       await store.set({ obQueue: items });
+      // the awaits above took a while: a tool batch may have started meanwhile
+      if (!agentIdleForQueue()) return;
       UI.setActivity(`Queue: sending “${first.text.slice(0, 60)}${first.text.length > 60 ? '…' : ''}”`, 'active', true);
       UI.setStatus('thinking', 'Queue');
       UI.showChip(`Queue ${items.length}: sending next prompt`, true);
       const ok = await typeAndSend(first.text, { label: 'Queue: sending next prompt…' });
       if (ok) {
-        const rest = items.slice(1).map((x) => ({ ...x, claim: null }));
-        await store.set({ obQueue: rest });
+        // re-read: prompts queued / removed while we were sending must survive
+        const cur = await getQueue();
+        await store.set({ obQueue: cur.items.filter((x) => x.id !== first.id).map((x) => ({ ...x, claim: null })) });
         renderQueueUi();
       }
     } finally {
@@ -1753,7 +1868,12 @@
           const item = items.find((x) => x.id === arg);
           if (item) {
             await store.set({ obQueue: items.filter((x) => x.id !== arg) });
-            await typeAndSend(item.text, { label: 'Queue: sending…' });
+            const sent = await typeAndSend(item.text, { label: 'Queue: sending…' });
+            if (!sent) { // do not lose the prompt when the chat did not take it
+              const cur = await getQueue();
+              cur.items.unshift(item);
+              await store.set({ obQueue: cur.items });
+            }
             renderQueueUi();
           }
         }
@@ -1781,6 +1901,7 @@
       });
       chrome.storage.onChanged.addListener((c, area) => {
         if (area !== 'local') return;
+        if (superseded()) return;
         if (c.autopilot) { autopilot = !!c.autopilot.newValue; UI.setAutopilot(autopilot); }
         if (c.obMaxTools) maxTools = clampMaxTools(c.obMaxTools.newValue); // v1.8
         if (c.obQueue || c.obQueuePaused) renderQueueUi();
@@ -1809,30 +1930,32 @@
     } catch (e) { /* context gone */ }
 
     let debounce = null;
-    new MutationObserver(() => {
+    observe(() => {
       checkGenerationCycle();
       clearTimeout(debounce);
-      debounce = setTimeout(scanForToolCalls, 250);
-    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+      debounce = setTimeout(() => { try { scanForToolCalls(); } catch (e) { /* DOM surprise */ } }, 250);
+    }, { childList: true, subtree: true, characterData: true });
 
     const prevBootTexts = new Map(); // turn -> text at previous boot tick (v1.8 history snapshot)
-    setInterval(() => {
-      if (location.href !== lastHref) { // new chat / navigation: forget history, do not replay it
-        lastHref = location.href;
+    every(() => {
+      // navigation = a different chat (path/query). A mere #hash change must not wipe the dedup set.
+      if (lastHref !== chatKey()) { // new chat / navigation: forget history, do not replay it
+        lastHref = chatKey();
         executed.clear(); setDetected(null);
         bootUntil = Date.now() + 3500;
         prevBootTexts.clear(); // bootTurns survives — turn nodes of the old chat stay history
         refreshVpsUi();
       }
       if (Date.now() < bootUntil) bootSnapshotTick(prevBootTexts); // v1.8
+      else if (prevBootTexts.size) prevBootTexts.clear(); // do not pin old DOM nodes after the boot window
       checkGenerationCycle();
       scanForToolCalls();
     }, 800);
     startChipSystem();
-    setInterval(checkRateLimit, 1500);
-    setInterval(checkHealth, 10000);
-    setInterval(() => processQueue('tick'), 6000);
-    checkHealth();
+    every(checkRateLimit, 1500);
+    every(checkHealth, 10000);
+    every(() => processQueue('tick'), 6000);
+    checkHealth().catch(() => { /* ignore */ });
 
     // ---- resume after browser reopen / tab reload ----
     (async () => {

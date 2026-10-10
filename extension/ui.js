@@ -7,7 +7,7 @@
   if (window.OB_UI) return;
 
   const HOST_ID = 'ob-root';
-  const VERSION = '1.8.1';
+  const VERSION = '1.8.2';
 
   /* ----------------------------------------------------------------- bar CSS
      v1.7: ZeroScript-style composer status bar (light DOM, page-level styles —
@@ -130,7 +130,7 @@ html.ob-light #ob-bar .ob-open:active{background:rgba(0,0,0,.12)}
   -webkit-font-smoothing:antialiased;
 }
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;touch-action:manipulation}
-input{font:inherit;color:inherit}
+input,textarea{font:inherit;color:inherit}
 svg{display:block;flex:none}
 .hidden{display:none!important}
 
@@ -149,7 +149,6 @@ svg{display:block;flex:none}
 .sheet.dragging{transition:none}
 @media (min-width:700px){
   .sheet{left:auto;right:16px;bottom:16px;width:440px;height:min(var(--sheet-h),calc(100vh - 32px));border:1px solid var(--border);border-radius:22px}
-  .fab{bottom:24px}
 }
 .grab{flex:none;padding:8px 0 2px;display:grid;place-items:center;touch-action:none;cursor:grab}
 .grab i{display:block;width:40px;height:4px;border-radius:4px;background:var(--border-2)}
@@ -234,8 +233,21 @@ svg{display:block;flex:none}
 .ln{white-space:pre-wrap;word-break:break-word;color:#cfd6ea}
 .ln.cmd{color:#7dd3fc;margin-top:8px;font-weight:600}.ln.cmd .ps{color:var(--ok)}
 .ln.stderr{color:#fca5a5}.ln.stdin{color:var(--warn)}
-.ln.exit{font-size:11px;color:var(--faint);margin:2px 0 4px}.ln.exit.bad{color:#f87171}.ln.exit.good{color:#4ade80}
+.ln.exit{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.2px;color:var(--faint);margin:3px 0 6px;padding:1px 9px;border-radius:999px;background:var(--surface-2)}
+.ln.exit.bad{color:#f87171;background:var(--err-soft)}.ln.exit.good{color:#4ade80;background:var(--ok-soft)}
 .ln.sys{color:var(--faint);font-style:italic}
+/* v1.8.2 terminal motion: new lines slide in, a thin progress sweep runs along the
+   top while a command is busy, and a blinking block caret trails the output. */
+.ln.fx{animation:lnin .24s cubic-bezier(.2,.8,.2,1) both}
+@keyframes lnin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.ln.cmd{padding-left:9px;border-left:2px solid var(--ok);margin-left:-2px}
+.term.busy::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;z-index:2;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);background-size:38% 100%;background-repeat:no-repeat;animation:tsweep 1.15s ease-in-out infinite}
+@keyframes tsweep{from{background-position:-45% 0}to{background-position:145% 0}}
+.term.busy .out::after{content:"";display:block;width:8px;height:15px;margin-top:6px;border-radius:1.5px;background:var(--accent);animation:caret 1s steps(1) infinite}
+@keyframes caret{0%,55%{opacity:1}56%,100%{opacity:0}}
+.term{transition:border-color .25s,box-shadow .25s}
+.term.busy{border-color:rgba(123,140,255,.45);box-shadow:0 0 0 3px rgba(123,140,255,.08)}
 .empty{color:var(--faint);text-align:center;padding:30px 12px;font-size:13px}
 .empty svg{margin:0 auto 10px;opacity:.6}
 .jump{position:absolute;right:10px;bottom:10px;width:38px;height:38px;border-radius:50%;background:var(--accent-2);color:#fff;display:grid;place-items:center;box-shadow:0 4px 14px rgba(0,0,0,.5)}
@@ -278,7 +290,8 @@ svg{display:block;flex:none}
 .log .det{margin-top:8px}
 
 /* ---------- Modal / toast ---------- */
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:flex-end;justify-content:center;pointer-events:auto;padding:0;animation:fadein .2s ease both}
+.modal{position:fixed;inset:0;bottom:var(--kb);background:rgba(0,0,0,.62);display:flex;align-items:flex-end;justify-content:center;pointer-events:auto;padding:0;animation:fadein .2s ease both;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.mcard{max-height:calc(var(--vvh) - 12px);overflow-y:auto;overscroll-behavior:contain}
 @keyframes fadein{from{opacity:0}to{opacity:1}}
 .mcard{width:100%;max-width:520px;background:var(--surface);border:1px solid var(--border-2);border-radius:22px 22px 0 0;padding:18px 16px calc(16px + env(safe-area-inset-bottom,0px));box-shadow:0 -10px 40px rgba(0,0,0,.6);animation:sheetin .32s cubic-bezier(.2,.8,.2,1) both}
 @keyframes sheetin{from{opacity:0;transform:translateY(60px) scale(.98)}to{opacity:1;transform:none}}
@@ -311,11 +324,14 @@ svg{display:block;flex:none}
 .lfeed{display:flex;flex-direction:column;gap:7px;margin-top:10px}
 .lrow{display:flex;gap:10px;align-items:flex-start;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:10px 12px;animation:lin .32s cubic-bezier(.2,.8,.3,1) both;transition:border-color .25s}
 @keyframes lin{from{opacity:0;transform:translateX(-14px)}to{opacity:1;transform:none}}
+.lrow.still{animation:none}
 .lrow.okf{border-color:var(--ok)}.lrow.badf{border-color:var(--err)}
 .lic{width:30px;height:30px;flex:none;border-radius:9px;display:grid;place-items:center;font-family:var(--mono);font-size:12px;font-weight:700;background:var(--accent-soft);color:var(--accent)}
-.lic.term{background:rgba(34,211,238,.13);color:#67e8f9}
-.lic.file{background:var(--ok-soft);color:var(--ok)}
-.lic.web{background:var(--warn-soft);color:var(--warn)}
+/* v1.8.2: was .lic.term — the SAME class as the terminal box (.term), which dragged
+   margin/border/flex onto Live rows and shifted them. Prefixed. */
+.lic.ic-term{background:rgba(34,211,238,.13);color:#67e8f9}
+.lic.ic-file{background:var(--ok-soft);color:var(--ok)}
+.lic.ic-web{background:var(--warn-soft);color:var(--warn)}
 .lmain{flex:1;min-width:0}
 .ltop{display:flex;align-items:center;gap:8px}
 .ltool{font-size:12.5px}
@@ -362,11 +378,13 @@ svg{display:block;flex:none}
 .gstep .gnum{width:22px;height:22px;border-radius:8px;background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:700;display:grid;place-items:center;flex:none;margin-top:1px}
 .gstep b{display:block;font-size:13.5px;font-weight:600}
 .gstep p{margin:3px 0 0;color:var(--muted);font-size:12.5px;line-height:1.45}
-.gstep p b{font-size:12.5px}
-.cmdrow{display:flex;align-items:center;gap:8px;margin-top:7px;background:var(--term);border:1px solid var(--border);border-radius:10px;padding:8px 10px;cursor:pointer;transition:border-color .2s,transform .1s}
-.cmdrow:active{transform:scale(.985);border-color:var(--accent)}
-.cmdrow code{flex:1;min-width:0;font-family:var(--mono);font-size:11px;color:#c3d0ff;white-space:pre-wrap;word-break:break-word;line-height:1.5}
-.cmdrow .cpl{color:var(--muted);flex:none;display:grid;place-items:center}
+.gstep p b{display:inline;font-size:inherit;font-weight:650;color:var(--text)}
+/* v1.8.2: was ".cmdrow" — the same class as the terminal input form, so the later
+   rule boxed, padded and "pressed" the terminal input row. Renamed. */
+.gcmd{display:flex;align-items:center;gap:8px;margin-top:7px;background:var(--term);border:1px solid var(--border);border-radius:10px;padding:8px 10px;cursor:pointer;transition:border-color .2s,transform .1s}
+.gcmd:active{transform:scale(.985);border-color:var(--accent)}
+.gcmd code{flex:1;min-width:0;font-family:var(--mono);font-size:11px;color:#c3d0ff;white-space:pre-wrap;word-break:break-word;line-height:1.5}
+.gcmd .cpl{color:var(--muted);flex:none;display:grid;place-items:center}
 .gtip{margin-top:8px;color:var(--faint);font-size:11.5px;line-height:1.45}
 `;
 
@@ -528,7 +546,7 @@ svg{display:block;flex:none}
               <div class="cwd" id="cwd"><bdi>~</bdi></div>
               <button class="btn sm" id="termClear" aria-label="Clear">${icon('trash', 15)}</button>
             </div>
-            <div class="term"><div class="out" id="out"></div><button class="jump hidden" id="jump" aria-label="Scroll to bottom">${icon('down', 18)}</button></div>
+            <div class="term" id="termBox"><div class="out" id="out"></div><button class="jump hidden" id="jump" aria-label="Scroll to bottom">${icon('down', 18)}</button></div>
             <div class="askbar hidden" id="ask"><div class="q" id="askQ"></div><button class="btn sm ok" data-ans="y">Yes</button><button class="btn sm" data-ans="n">No</button></div>
             <div class="quick" id="quick"></div>
             <form class="cmdrow" id="cmdForm" autocomplete="off">
@@ -645,7 +663,7 @@ svg{display:block;flex:none}
 
     for (const id of ['scrim', 'sheet', 'grab', 'sub', 'pill', 'close', 'statusBox', 'ring', 'stTitle', 'stText', 'offlineBox',
       'detCard', 'detCode', 'detSkip', 'detRun', 'apToggle', 'apSwitch', 'mtMinus', 'mtVal', 'mtPlus', 'inject', 'copyPrompt', 'qNew', 'qOpenQueue', 'qCountLbl', 'qSaved', 'queueCard', 'qCount', 'qPause', 'qClear', 'qList', 'bgCard', 'bgRefresh', 'bgBody',
-      'srvBody', 'chatVpsRow', 'chatVpsName', 'chatVpsSwitch', 'infoRefresh', 'cwd', 'termClear', 'out', 'jump', 'ask', 'askQ', 'quick', 'cmdForm', 'cmd', 'ps',
+      'srvBody', 'chatVpsRow', 'chatVpsName', 'chatVpsSwitch', 'infoRefresh', 'cwd', 'termClear', 'termBox', 'out', 'jump', 'ask', 'askQ', 'quick', 'cmdForm', 'cmd', 'ps',
       'fUp', 'fPath', 'fUpload', 'fRefresh', 'fFile', 'fScroll', 'fList', 'viewer', 'vBack', 'vName', 'vCopy', 'vText', 'logRefresh', 'logList',
       'liveDot', 'liveReconnect', 'liveFeed', 'liveEmpty', 'instRun', 'instBar', 'instFill', 'instSteps',
       'vpsList', 'vpsAdd', 'multiToggle', 'multiSwitch', 'connTitle', 'setUrl', 'setTok', 'tokEye', 'saveConn', 'connMsg', 'setWs', 'strictToggle', 'strictSwitch', 'saveWs', 'wsMsg', 'termBadge', 'otaLine', 'otaCheck', 'otaAutoToggle', 'otaAutoSwitch', 'otaHint',
@@ -656,6 +674,20 @@ svg{display:block;flex:none}
 
     // Keep keystrokes inside the panel away from the host page's shortcuts.
     for (const ev of ['keydown', 'keyup', 'keypress']) host.addEventListener(ev, (e) => e.stopPropagation());
+  }
+
+  /* ---------------------------------------------------------- keyboard helpers */
+  // Touch screens: never auto-focus a field (it raises the on-screen keyboard
+  // unasked). Desktop keeps the convenient autofocus.
+  const isTouch = () => { try { return !!(window.matchMedia && window.matchMedia('(pointer:coarse)').matches); } catch (e) { return false; } };
+  const focusIfDesktop = (node) => { if (!isTouch()) { try { node.focus(); } catch (e) { /* ignore */ } } };
+  function blurPanelFocus() {
+    try {
+      const a = shadow && shadow.activeElement;
+      if (a && a.blur) a.blur();
+      const d = document.activeElement;
+      if (d === host && d.blur) d.blur();
+    } catch (e) { /* ignore */ }
   }
 
   /* ----------------------------------------------------------- sheet / fab */
@@ -687,7 +719,10 @@ svg{display:block;flex:none}
         stopPolling();
         stopLive();
         closeQuickPrompt();
-        document.activeElement && document.activeElement.blur && document.activeElement.blur();
+        // v1.8.2: the panel lives in a shadow root, where document.activeElement is
+        // just the host — so this blur never reached the real field and the on-screen
+        // keyboard stayed up after closing. shadow.activeElement is the focused field.
+        blurPanelFocus();
       } catch (e) { /* ignore */ }
     }
   }
@@ -801,6 +836,21 @@ svg{display:block;flex:none}
   }
 
   // Per-site in-flow mount plan (null → anchored/fixed mode).
+  // v1.8.2: an in-flow bar is a full-width block. Inside a ROW flex (no wrap), a grid
+  // or an inline container it becomes a sibling of the input and squeezes the text
+  // box to a sliver (a composer whose input was 22px wide, unusable). Only mount
+  // in-flow where children stack vertically; otherwise use the anchored mode.
+  function barFlowSafe(p) {
+    try {
+      if (!p) return false;
+      const cs = getComputedStyle(p);
+      const d = cs.display || '';
+      if (d.indexOf('grid') >= 0 || d.indexOf('inline') === 0) return false;
+      if (d.indexOf('flex') >= 0 && !/^column/.test(cs.flexDirection) && cs.flexWrap === 'nowrap') return false;
+      return true;
+    } catch (e) { return true; }
+  }
+
   function barMountPlan() {
     try {
       const getEd = S.handlers.getComposer;
@@ -811,6 +861,7 @@ svg{display:block;flex:none}
       const site = S.handlers.site || '';
       const box = barComposerBox(ed, send);
       if (!box || box === document.body) return null;
+      if (site === 'gemini' ? !barFlowSafe(box.parentElement) : !barFlowSafe(box)) return null;
       if (site === 'deepseek' || site === 'chatgpt') {
         // Insert as the box's FIRST child (above the input), like ZeroScript on
         // DeepSeek — reflows cleanly, spans the full input width.
@@ -942,7 +993,14 @@ svg{display:block;flex:none}
     refs.statusBox.className = 'status ' + state;
     refs.stTitle.textContent = label || meta.title;
     refs.stText.textContent = S.activity.text || '';
-    refs.ring.innerHTML = (S.activity.spinner || state === 'thinking' || state === 'running') ? '<div class="spin"></div>' : icon(meta.icon, 26);
+    // Rebuild the ring only when it actually changes — re-setting innerHTML on every
+    // status/activity tick restarted the spinner animation (it looked frozen).
+    const spinning = !!(S.activity.spinner || state === 'thinking' || state === 'running');
+    const ringSig = spinning ? 'spin' : 'ic:' + meta.icon;
+    if (refs.ring.dataset.sig !== ringSig) {
+      refs.ring.dataset.sig = ringSig;
+      refs.ring.innerHTML = spinning ? '<div class="spin"></div>' : icon(meta.icon, 26);
+    }
     refs.sub.textContent = S.online ? (S.info ? `${S.info.user}@${S.info.hostname}` : 'Connected') : 'Not connected';
     refs.ps.textContent = S.info && S.info.isRoot ? '#' : '$';
     renderBarState(); // v1.7: keep the composer bar in the same state
@@ -1015,18 +1073,22 @@ svg{display:block;flex:none}
       refs.cwd.innerHTML = ''; const b = document.createElement('bdi'); b.textContent = data.cwd; refs.cwd.appendChild(b);
     }
     S.termBusy = !!data.busy;
-    refs.cmd.placeholder = S.termBusy ? 'Type input for the running command…' : 'Run a command…';
+    refs.cmd.placeholder = S.termBusy ? 'Send input…' : 'Run a command…';
+    if (refs.termBox) refs.termBox.classList.toggle('busy', S.termBusy);
 
     const fresh = data.entries.filter(e => e.seq > S.termSeq);
     if (fresh.length) {
       if (refs.out.querySelector('.empty')) refs.out.innerHTML = '';
       const frag = document.createDocumentFragment();
+      // Animate only live arrivals — never the first bulk load of history, and
+      // never a huge burst (hundreds of simultaneous animations janks phones).
+      const animate = S.termSeq > 0 && fresh.length <= 40 && S.open && S.tab === 'term';
       for (const e of fresh) {
         S.termSeq = Math.max(S.termSeq, e.seq);
         if (e.type === 'prompt') { showAsk(e.text); continue; }
         if (e.type === 'command' || e.type === 'stdin' || e.type === 'exit') hideAsk();
         const n = lineNode(e);
-        if (n) frag.appendChild(n);
+        if (n) { if (animate) n.classList.add('fx'); frag.appendChild(n); }
       }
       refs.out.appendChild(frag);
       while (refs.out.children.length > 700) refs.out.removeChild(refs.out.firstChild);
@@ -1110,10 +1172,12 @@ svg{display:block;flex:none}
       { t: 'pm2 ls', c: 'pm2 ls' }, { t: 'free -h', c: 'free -h' }, { t: 'docker ps', c: 'docker ps' }
     ];
     const mk = (label, cls, fn) => { const b = el('button', 'qk ' + (cls || ''), label); b.type = 'button'; b.addEventListener('click', fn); refs.quick.appendChild(b); return b; };
-    mk('↑', '', () => { if (S.histIdx < S.termHistory.length - 1) { S.histIdx++; refs.cmd.value = S.termHistory[S.histIdx]; refs.cmd.focus(); } });
+    // v1.8.2: quick chips only FILL the command box (tap Run to send it) — they no
+    // longer focus the field, which popped the on-screen keyboard on every tap.
+    mk('↑', '', () => { if (S.histIdx < S.termHistory.length - 1) { S.histIdx++; refs.cmd.value = S.termHistory[S.histIdx]; focusIfDesktop(refs.cmd); } });
     mk('↓', '', () => { if (S.histIdx > 0) { S.histIdx--; refs.cmd.value = S.termHistory[S.histIdx]; } else { S.histIdx = -1; refs.cmd.value = ''; } });
     mk('Ctrl+C', 'danger', async () => { const r = await api('POST', '/api/terminal/kill', {}); toast(r.message || (r.success ? 'Stopped' : 'Nothing running')); pollTerminal(); });
-    for (const q of quick) mk(q.t, '', () => { refs.cmd.value = q.c; refs.cmd.focus(); });
+    for (const q of quick) mk(q.t, '', () => { refs.cmd.value = q.c; focusIfDesktop(refs.cmd); });
     mk('clear', '', () => refs.termClear.click());
   }
 
@@ -1411,7 +1475,7 @@ svg{display:block;flex:none}
     refs.qpName.value = prename || '';
     renderSavedChips(refs.qpSaved);
     refs.qModal.classList.remove('hidden');
-    setTimeout(() => { try { refs.qpText.focus(); } catch (e) { /* ignore */ } }, 80);
+    setTimeout(() => focusIfDesktop(refs.qpText), 80);
   }
   function closeQuickPrompt() {
     if (refs.qModal) refs.qModal.classList.add('hidden');
@@ -1478,6 +1542,7 @@ svg{display:block;flex:none}
   let livePort = null;
   let liveRetryT = null;
   const liveRows = new Map(); // event id -> { row, meta }
+  const liveSeen = new Set(); // event ids already shown (replays on reconnect must not duplicate)
   const INST_STEPS = [
     ['node', 'Check Node.js'], ['workspace', 'Verify workspace'], ['token', 'Check auth token'],
     ['service', 'Write systemd unit'], ['reload', 'Reload systemd'], ['enable', 'Enable on boot'],
@@ -1488,9 +1553,9 @@ svg{display:block;flex:none}
   function liveSetDot(state) { if (refs.liveDot) refs.liveDot.className = 'livedot ' + state; }
 
   function liveIconClass(t) {
-    return /^(terminal_|run_command|parallel_commands|start_background|stop_background|tail_log|list_background)/.test(t) ? 'term'
-      : /file|dir|zip|unzip|move|copy|search|make_dir|batch/.test(t) ? 'file'
-      : /web|fetch/.test(t) ? 'web' : '';
+    return /^(terminal_|run_command|parallel_commands|start_background|stop_background|tail_log|list_background)/.test(t) ? 'ic-term'
+      : /file|dir|zip|unzip|move|copy|search|make_dir|batch/.test(t) ? 'ic-file'
+      : /web|fetch/.test(t) ? 'ic-web' : '';
   }
   function liveIconChar(t) {
     if (t === 'upload') return '↑';
@@ -1504,9 +1569,9 @@ svg{display:block;flex:none}
     return '*';
   }
 
-  function liveAddRow(id, tool, summary, ts) {
+  function liveAddRow(id, tool, summary, ts, replayed) {
     if (refs.liveEmpty && refs.liveEmpty.parentNode) refs.liveEmpty.remove();
-    const row = el('div', 'lrow');
+    const row = el('div', 'lrow' + (replayed ? ' still' : ''));
     const ic = el('span', 'lic ' + liveIconClass(tool), liveIconChar(tool));
     const main = el('div', 'lmain');
     const top = el('div', 'ltop');
@@ -1536,13 +1601,24 @@ svg{display:block;flex:none}
     setTimeout(() => { if (found.row) found.row.classList.remove('okf', 'badf'); }, 900);
   }
 
-  function handleLiveEvent(e) {
+  function handleLiveEvent(e, replayed) {
     if (!e || !e.type) return;
-    if (e.type === 'init') { (e.replay || []).slice().reverse().forEach((x) => handleLiveEvent(x)); return; }
-    if (e.type === 'tool_start') liveAddRow(e.id, e.tool, e.summary, e.ts);
-    else if (e.type === 'tool_end') liveEndRow(e.id, e.ok, e.durationMs, e.summary);
-    else if (e.type === 'upload') liveAddRow(null, 'upload', `${e.name} (${fmtBytes(e.size)})`, e.ts);
-    else if (e.type === 'install') handleInstallEvent(e);
+    // v1.8.2: the server's replay is already oldest -> newest and rows are PREPENDED
+    // (newest on top). It used to be reversed, so a tool's "end" arrived before its
+    // "start" (rows stuck on "running…" forever), the oldest sat on top, and every
+    // reconnect re-added the whole replay. Now: chronological + de-duplicated.
+    if (e.type === 'init') { (e.replay || []).forEach((x) => handleLiveEvent(x, true)); return; }
+    if (e.type === 'tool_start') {
+      if (e.id && liveSeen.has(e.id)) return;
+      if (e.id) { liveSeen.add(e.id); if (liveSeen.size > 400) liveSeen.delete(liveSeen.values().next().value); }
+      liveAddRow(e.id, e.tool, e.summary, e.ts, replayed);
+    } else if (e.type === 'tool_end') liveEndRow(e.id, e.ok, e.durationMs, e.summary);
+    else if (e.type === 'upload') {
+      const k = 'u:' + e.ts + ':' + e.name;
+      if (liveSeen.has(k)) return;
+      liveSeen.add(k);
+      liveAddRow(null, 'upload', `${e.name} (${fmtBytes(e.size)})`, e.ts, replayed);
+    } else if (e.type === 'install' && !replayed) handleInstallEvent(e);
   }
 
   function startLive() {
@@ -1770,7 +1846,7 @@ svg{display:block;flex:none}
     await persistProfiles();
     renderVpsList();
     fillConnEditor();
-    try { refs.setUrl.focus(); } catch (e) { /* ignore */ }
+    focusIfDesktop(refs.setUrl);
   }
 
   async function removeProfile(id) {
@@ -1818,8 +1894,11 @@ svg{display:block;flex:none}
   }
 
   /* ------------------------------------------------------- VPS setup guide */
+  // v1.8.2: `row` used to be declared INSIDE guideSteps() but called from renderGuide(),
+  // so opening Settings → VPS setup guide threw "row is not defined" and showed nothing.
+  const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const guideCmd = (cmd) => `<div class="gcmd" role="button" tabindex="0" data-cmd="${escHtml(cmd)}"><code>${escHtml(cmd)}</code><span class="cpl">${icon('copy', 14)}</span></div>`;
   function guideSteps() {
-    const row = (cmd) => `<div class="cmdrow" data-cmd="${cmd.replace(/"/g, '&quot;')}"><code>${cmd}</code><span class="cpl">${icon('copy', 14)}</span></div>`;
     return [
       { t: 'Get an Ubuntu VPS', p: `Any provider works (Hetzner, DigitalOcean, Oracle free tier, ...). Ubuntu 22.04 or 24.04. You need the <b>IP address</b> and the <b>root password</b>.` },
       { t: 'SSH in from your phone', p: `Install <b>Termius</b> (Play Store) → New Host → address = your VPS IP, username <b>root</b>, your password → Connect. On a PC it is:` , cmds: ['ssh root@YOUR_VPS_IP'] },
@@ -1837,13 +1916,15 @@ svg{display:block;flex:none}
     let html = '';
     steps.forEach((s, i) => {
       html += `<div class="gstep" style="animation-delay:${i * 45}ms"><div class="gnum">${i + 1}</div><div class="grow"><b>${s.t}</b><p>${s.p}</p>`;
-      if (s.cmds) for (const c of s.cmds) html += row(c);
+      if (s.cmds) for (const c of s.cmds) html += guideCmd(c);
       if (s.tip) html += `<div class="gtip">${s.tip}</div>`;
       html += `</div></div>`;
     });
     refs.guideBody.innerHTML = html;
-    for (const r of refs.guideBody.querySelectorAll('.cmdrow')) {
-      r.addEventListener('click', () => copyText(r.getAttribute('data-cmd'), 'Copied — paste in Termius'));
+    for (const r of refs.guideBody.querySelectorAll('.gcmd')) {
+      const go = () => copyText(r.getAttribute('data-cmd'), 'Copied — paste in Termius');
+      r.addEventListener('click', go);
+      r.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
     }
   }
 

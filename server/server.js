@@ -21,7 +21,7 @@ const parallelTools = require('./tools/parallel_tools');
 const installer = require('./installer');
 const { getTerminalSession } = require('./tools/terminal_session');
 
-const VERSION = '1.8.1';
+const VERSION = '1.8.2';
 const STARTED_AT = new Date().toISOString();
 
 process.on('uncaughtException', (err) => console.error('[Server Error] Uncaught:', err));
@@ -89,8 +89,11 @@ function uploadsDir() {
 }
 
 function persistConfig() {
-  const { port, workspaceRoot, strictWorkspace, allowedOrigins, commandTimeoutMs, mcpServers, allowPrivateFetch, trustProxyHeaders, commandDenylist } = config;
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ port, workspaceRoot, strictWorkspace, allowedOrigins, commandTimeoutMs, mcpServers, allowPrivateFetch, trustProxyHeaders, commandDenylist }, null, 2), 'utf8');
+  const { port, workspaceRoot, strictWorkspace, allowedOrigins, commandTimeoutMs, mcpServers, allowPrivateFetch, trustProxyHeaders, commandDenylist, maxUploadMb } = config;
+  // atomic write: a crash mid-write must not leave a truncated config.json
+  const tmp = CONFIG_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify({ port, workspaceRoot, strictWorkspace, allowedOrigins, commandTimeoutMs, mcpServers, allowPrivateFetch, trustProxyHeaders, commandDenylist, maxUploadMb }, null, 2), 'utf8');
+  fs.renameSync(tmp, CONFIG_PATH);
 }
 
 /* ------------------------------------------------------------------- token */
@@ -102,6 +105,7 @@ if (!AUTH_TOKEN) {
   fs.writeFileSync(TOKEN_PATH, AUTH_TOKEN + '\n', { mode: 0o600 });
   console.log('🔑 Generated new auth token -> server/.token');
 }
+try { fs.chmodSync(TOKEN_PATH, 0o600); } catch (e) { /* not file-backed */ }
 const TOKEN_HASH = crypto.createHash('sha256').update(AUTH_TOKEN).digest();
 // Commands run by the model must never see the secret.
 delete process.env.BRIDGE_TOKEN;
@@ -148,7 +152,18 @@ setInterval(() => {
 const terminalSession = getTerminalSession(config.workspaceRoot);
 
 const recentLogs = [];
+// Params can carry whole file bodies (write_file / batch_write_files up to 25 MB);
+// keeping them verbatim in the 100-entry ring would pin gigabytes. Clip long strings.
+function clipParams(v, depth = 0) {
+  if (typeof v === 'string') return v.length > 2000 ? v.slice(0, 2000) + `…[${v.length - 2000} more chars]` : v;
+  if (v == null || typeof v !== 'object' || depth > 4) return v;
+  if (Array.isArray(v)) return v.slice(0, 50).map((x) => clipParams(x, depth + 1));
+  const out = {};
+  for (const k of Object.keys(v).slice(0, 50)) out[k] = clipParams(v[k], depth + 1);
+  return out;
+}
 function addLog(entry) {
+  if (entry && entry.params !== undefined) entry = { ...entry, params: clipParams(entry.params) };
   recentLogs.unshift({ timestamp: new Date().toISOString(), ...entry });
   if (recentLogs.length > 100) recentLogs.pop();
 }
@@ -215,17 +230,32 @@ function sendJson(res, statusCode, data) {
 
 function parseJsonBody(req) {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks = [];
     let size = 0;
+    let done = false;
     req.on('data', (chunk) => {
+      if (done) return;
       size += chunk.length;
-      if (size > 25 * 1024 * 1024) { reject(new Error('Payload too large')); req.destroy(); return; }
-      body += chunk;
+      if (size > 25 * 1024 * 1024) {
+        done = true;
+        const err = new Error('Payload too large');
+        err.code = 'ETooLarge';
+        req.resume(); // drain instead of destroying the socket so the 413 can actually be delivered
+        reject(err);
+        return;
+      }
+      chunks.push(chunk); // Buffers: decoding per chunk would corrupt multi-byte chars split across chunks
     });
     req.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch (e) { reject(new Error('Invalid JSON body')); }
+      if (done) return;
+      done = true;
+      const body = Buffer.concat(chunks, size).toString('utf8');
+      let parsed;
+      try { parsed = body.trim() ? JSON.parse(body) : {}; } catch (e) { const err = new Error('Invalid JSON body'); err.code = 'EBadJson'; reject(err); return; }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) { const err = new Error('JSON body must be an object'); err.code = 'EBadJson'; reject(err); return; }
+      resolve(parsed);
     });
-    req.on('error', reject);
+    req.on('error', (e) => { if (!done) { done = true; reject(e); } });
   });
 }
 
@@ -359,7 +389,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } // fixed base: a hostile Host header must not be able to throw here
+  catch (e) { sendJson(res, 400, { success: false, error: 'Bad request URL' }); return; }
 
   if (url.pathname === '/' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -519,11 +551,11 @@ const server = http.createServer(async (req, res) => {
       const target = fsTools.resolveSafePath(url.searchParams.get('path') || '', config.workspaceRoot, config.strictWorkspace);
       const st = fs.statSync(target);
       if (st.isDirectory()) throw new Error('Path is a directory');
+      if (!st.isFile()) throw new Error('Not a regular file'); // FIFOs / devices would block the event loop
       const limit = 512 * 1024;
       const fd = fs.openSync(target, 'r');
       const buf = Buffer.alloc(Math.min(st.size, limit));
-      fs.readSync(fd, buf, 0, buf.length, 0);
-      fs.closeSync(fd);
+      try { fs.readSync(fd, buf, 0, buf.length, 0); } finally { fs.closeSync(fd); }
       if (buf.subarray(0, 8192).includes(0)) { sendJson(res, 200, { success: true, path: target, binary: true, size: st.size }); return; }
       sendJson(res, 200, { success: true, path: target, size: st.size, truncated: st.size > limit, content: buf.toString('utf8') });
       return;
@@ -558,6 +590,7 @@ const server = http.createServer(async (req, res) => {
       const target = fsTools.resolveSafePath(url.searchParams.get('path') || '', config.workspaceRoot, config.strictWorkspace);
       const st = fs.statSync(target);
       if (st.isDirectory()) throw new Error('Path is a directory');
+      if (!st.isFile()) throw new Error('Not a regular file');
       if (st.size > 500 * 1024 * 1024) throw new Error('File too large to download (max 500 MB) — zip it or use scp.');
       const mime = MIME[path.extname(target).toLowerCase()] || 'application/octet-stream';
       const fileName = path.basename(target);
@@ -569,6 +602,8 @@ const server = http.createServer(async (req, res) => {
       });
       const stream = fs.createReadStream(target);
       stream.on('error', () => { try { res.destroy(); } catch (e) { /* ignore */ } });
+      // client went away mid-download: pipe() does not close the source, so the fd would leak
+      res.on('close', () => stream.destroy());
       stream.pipe(res);
       return;
     }
@@ -616,7 +651,7 @@ const server = http.createServer(async (req, res) => {
         try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch (e) { /* closed */ }
       });
       const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) { /* closed */ } }, 15000);
-      req.on('close', () => { clearInterval(beat); unsubscribe(); });
+      res.on('close', () => { clearInterval(beat); unsubscribe(); });
       return;
     }
 
@@ -632,7 +667,7 @@ const server = http.createServer(async (req, res) => {
       const fn = (e) => { try { res.write(`data: ${JSON.stringify(e)}\n\n`); } catch (err) { /* closed */ } };
       eventSubs.add(fn);
       const beat = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) { /* closed */ } }, 15000);
-      req.on('close', () => { clearInterval(beat); eventSubs.delete(fn); });
+      res.on('close', () => { clearInterval(beat); eventSubs.delete(fn); });
       return;
     }
 
@@ -646,7 +681,7 @@ const server = http.createServer(async (req, res) => {
       const steps = Array.isArray(body.steps) ? body.steps.map(String) : null;
       if (installer.getState().running) { sendJson(res, 409, { success: false, started: false, reason: 'An install run is already in progress.' }); return; }
       const v = installer.validateSteps(steps);
-      if (!v.ok) { sendJson(res, 409, { success: false, started: false, reason: v.reason }); return; }
+      if (!v.ok) { sendJson(res, 400, { success: false, started: false, reason: v.reason }); return; }
       // Fire and forget: the run streams progress over /api/events (and can be
       // polled at /api/install/state), so the HTTP answer must not block on it.
       installer.runInstall(steps, config, emitEvent)
@@ -659,15 +694,18 @@ const server = http.createServer(async (req, res) => {
     /* ---- tools ---- */
     if (url.pathname === '/api/execute' && req.method === 'POST') {
       const payload = await parseJsonBody(req);
-      const { tool, params = {} } = payload;
-      if (!tool) { sendJson(res, 400, { success: false, error: 'Missing tool name' }); return; }
+      const { tool } = payload;
+      let params = payload.params;
+      if (params == null) params = {};
+      if (!tool || typeof tool !== 'string') { sendJson(res, 400, { success: false, error: 'Missing tool name' }); return; }
+      if (typeof params !== 'object' || Array.isArray(params)) { sendJson(res, 400, { success: false, error: 'params must be an object' }); return; }
 
       console.log(`🤖 ${tool} ${JSON.stringify(params).slice(0, 160)}`);
       const startTime = Date.now();
       const evtId = crypto.randomUUID();
-      emitEvent({ type: 'tool_start', id: evtId, tool, summary: describeParams(tool, params || {}) });
+      emitEvent({ type: 'tool_start', id: evtId, tool, summary: describeParams(tool, params) });
       try {
-        const result = await runTool(tool, params || {});
+        const result = await runTool(tool, params);
         const durationMs = Date.now() - startTime;
         addLog({ tool, params, success: true, durationMs, resultSummary: summarize(result) });
         emitEvent({ type: 'tool_end', id: evtId, tool, ok: true, durationMs, summary: summarize(result) });
@@ -685,7 +723,9 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 404, { error: 'Not found' });
   } catch (err) {
     console.error('Server error:', err.message);
-    sendJson(res, (err.message === 'Payload too large' || err.code === 'ETooLarge') ? 413 : 500, { success: false, error: err.message });
+    if (res.headersSent) { try { res.destroy(); } catch (e) { /* ignore */ } return; }
+    const status = (err.message === 'Payload too large' || err.code === 'ETooLarge') ? 413 : (err.code === 'EBadJson' ? 400 : 500);
+    sendJson(res, status, { success: false, error: err.message });
   }
 });
 

@@ -1,5 +1,75 @@
 # Changelog
 
+## OrbitBridge v1.8.2 (2026-10-10)
+
+Bug-fix and polish release: the panel, the terminal, the Live feed and the engine.
+
+### Fixed — panel
+
+- **VPS setup guide never opened.** `row` was declared inside `guideSteps()` but
+  called from `renderGuide()`, so Settings -> VPS setup guide threw
+  "row is not defined". Guide commands are also HTML-escaped now, keyboard
+  reachable (Enter/Space), and bold words no longer break onto their own lines.
+- **Live tab: finished tools stuck on "running...", oldest rows on top, rows
+  duplicated on every reconnect.** The server's replay is oldest -> newest, but the
+  panel reversed it, so a tool's "end" arrived before its "start". Replay is now
+  processed in order and de-duplicated by event id.
+- **Terminal input row looked boxed/pressed; Live terminal rows were shifted.**
+  Two CSS class-name collisions (`.cmdrow` shared by the terminal form and the guide
+  command boxes; `.term` shared by the terminal box and the Live row icon). Renamed
+  (`.gcmd`, `.ic-term`, `.ic-file`, `.ic-web`).
+- **Text typed in the Quick prompt box was nearly invisible** in dark mode
+  (`textarea` did not inherit the text colour).
+- **Status ring spinner restarted on every status tick** (looked frozen). The ring is
+  rebuilt only when its state actually changes.
+- **Quick-prompt modal hid behind the on-screen keyboard.** It now rides above the
+  keyboard and scrolls on short screens.
+
+### Fixed — mobile keyboard (on top of the v1.8.1 guard)
+
+- Terminal quick chips (`ls -la`, `git status`, history arrows) only fill the
+  command box; they no longer pop the keyboard. The Quick-prompt box and the "Add
+  VPS" URL field no longer auto-focus on touch screens.
+- Closing the panel really blurs the focused field (the panel lives in a shadow
+  root, where `document.activeElement` is only the host, so the old blur did nothing).
+
+### Fixed — engine (`content.js`)
+
+- All automated sends go through one queue (two concurrent sends could clobber
+  or double-send in the same composer).
+- Timers and observers are torn down when a newer engine takes over the page.
+- Cover overlay: watchdog so a hung send can never leave the composer covered;
+  fixed a race between hide/show timers.
+- Rate-limit detection no longer fires on the AI's own words ("try again later").
+- Queue: a prompt is no longer lost if the chat did not accept it; queue edits made
+  during a send survive; the queue waits for the reply to start.
+- Long tool output keeps its head AND tail (errors are usually at the end); a batch
+  shares one size budget.
+- Empty lines in a typed result are preserved; `#hash` navigation no longer wipes
+  the dedup set; the dedup signature ignores our own chips.
+- Status bar: if the composer's container is a no-wrap row flex, a grid or inline,
+  the bar uses the anchored mode instead of squeezing the text box to a sliver.
+
+### Added — look & feel
+
+- **Terminal motion:** new lines slide in, a progress sweep and glow run while a
+  command is busy, a blinking caret trails the output, exit status is a coloured
+  pill, and commands get an accent bar.
+- **Running chips show live elapsed time** ("running... 12s") on the AI message.
+
+### Server
+
+- Atomic `config.json` writes; `.token` forced to mode 600.
+- Request bodies are decoded from Buffers (multi-byte characters split across
+  chunks were corrupted); invalid / non-object JSON answers 400, oversize 413
+  (connection drained so the answer is delivered).
+- Event/terminal streams and downloads release their resources when the client
+  disconnects (`res` close, not `req`).
+- Symlink-safe path checks, including dangling symlinks; regular-file checks for
+  read/download (FIFOs/devices could block the process); validated tool params;
+  `zip` stores symlinks as links instead of following them out of the workspace;
+  logged params are clipped so big writes cannot pin memory.
+
 ## OrbitBridge v1.8.1 (2026-10-10)
 
 Mobile keyboard fix. Extension + version strings only.

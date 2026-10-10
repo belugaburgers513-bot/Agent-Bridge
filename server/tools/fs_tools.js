@@ -45,6 +45,7 @@ function resolveSafePath(userPath, workspaceRoot, strictWorkspace = false) {
   }
 
   // Clean up quotes or leading/trailing whitespace
+  if (typeof userPath !== 'string') throw new Error('path must be a string');
   let cleanPath = userPath.trim().replace(/^["']|["']$/g, '');
 
   // Expand ~ to user home directory
@@ -70,9 +71,17 @@ function resolveSafePath(userPath, workspaceRoot, strictWorkspace = false) {
     if (!isOutside) {
       try {
         let probe = resolved;
-        while (!fs.existsSync(probe) && probe !== path.dirname(probe)) probe = path.dirname(probe);
+        // lstat (not existsSync): a DANGLING symlink reports "missing" via existsSync, so a
+        // write through link -> /outside/new-file would have been judged by its parent dir.
+        const present = (q) => { try { fs.lstatSync(q); return true; } catch (e) { return false; } };
+        while (!present(probe) && probe !== path.dirname(probe)) probe = path.dirname(probe);
         const realRoot = fs.realpathSync(normalizedRoot);
-        const realProbe = fs.realpathSync(probe);
+        let realProbe;
+        try { realProbe = fs.realpathSync(probe); }
+        catch (e) {
+          // realpath fails on a dangling symlink: resolve its target by hand and judge that
+          realProbe = path.resolve(path.dirname(probe), fs.readlinkSync(probe));
+        }
         const relReal = path.relative(realRoot, realProbe);
         isOutside = relReal === '..' || relReal.startsWith('..' + path.sep) || path.isAbsolute(relReal);
       } catch (e) { /* fall back to lexical check */ }
@@ -94,6 +103,9 @@ async function readFile({ path: targetPath, offset = 0, length = null, withLineN
   const stat = fs.statSync(filePath);
   if (stat.isDirectory()) {
     throw new Error(`Path is a directory, not a file: ${filePath}. Use list_dir instead.`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Not a regular file (device/FIFO/socket): ${filePath}`);
   }
 
   // Check if file is suspiciously large or binary
@@ -126,7 +138,8 @@ async function readFile({ path: targetPath, offset = 0, length = null, withLineN
   if (offset > 0 || length !== null || withLineNumbers) {
     const lines = content.split('\n');
     const start = Math.max(0, parseInt(offset, 10) || 0);
-    const len = length !== null ? parseInt(length, 10) : lines.length;
+    const parsedLen = length !== null ? parseInt(length, 10) : NaN;
+    const len = Number.isFinite(parsedLen) && parsedLen >= 0 ? parsedLen : lines.length;
     const end = Math.min(lines.length, start + len);
     const sliced = lines.slice(start, end);
 
@@ -176,6 +189,10 @@ async function editFile({ path: targetPath, search, replace, allowMultiple = fal
     throw new Error(`File not found: ${filePath}`);
   }
 
+  if (typeof search !== 'string' || search === '') {
+    throw new Error('search must be a non-empty string');
+  }
+  replace = replace == null ? '' : String(replace);
   let content = fs.readFileSync(filePath, 'utf8');
   if (!content.includes(search)) {
     throw new Error(`Search pattern not found in file: ${filePath}`);
@@ -330,6 +347,8 @@ async function batchWriteFiles({ files = [] }, config) {
 }
 
 async function searchFiles({ path: targetPath = '.', query = '', isRegex = false, maxResults = 50 }, config) {
+  maxResults = Math.min(Math.max(parseInt(maxResults, 10) || 50, 1), 1000);
+  query = String(query ?? '');
   const dirPath = resolveSafePath(targetPath, config.workspaceRoot, config.strictWorkspace);
   if (!fs.existsSync(dirPath)) {
     throw new Error(`Directory not found: ${dirPath}`);
@@ -347,9 +366,11 @@ async function searchFiles({ path: targetPath = '.', query = '', isRegex = false
 
   function searchDir(currentDir) {
     if (results.length >= maxResults) return;
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    let entries;
+    try { entries = fs.readdirSync(currentDir, { withFileTypes: true }); } catch (_) { return; } // unreadable subdir must not abort the whole search
 
     for (const entry of entries) {
+      if (results.length >= maxResults) return;
       if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
       const fullPath = path.join(currentDir, entry.name);
 
@@ -372,8 +393,7 @@ async function searchFiles({ path: targetPath = '.', query = '', isRegex = false
           if (stat.size < 2 * 1024 * 1024) {
             const fd = fs.openSync(fullPath, 'r');
             const head = Buffer.alloc(Math.min(stat.size, 1024));
-            fs.readSync(fd, head, 0, head.length, 0);
-            fs.closeSync(fd);
+            try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
             if (head.includes(0)) continue; // binary file — don't search, don't decode
             const content = fs.readFileSync(fullPath, 'utf8');
             const lines = content.split('\n');
@@ -442,7 +462,10 @@ async function zipFiles({ paths = [], out = null }, config) {
   let first = true;
   for (const [parent, names] of groups) {
     const args = first ? ['-r'] : ['-r', '-u']; // update mode after the first pass
-    await run('zip', [...args, outPath, ...names], { cwd: parent });
+    // -y: store symlinks AS symlinks (default follows them, which would pull files from
+    // outside the workspace into the archive). './' keeps a name like "-x" from being
+    // parsed as an option.
+    await run('zip', [...args, '-y', outPath, ...names.map((n) => './' + n)], { cwd: parent });
     first = false;
   }
 
