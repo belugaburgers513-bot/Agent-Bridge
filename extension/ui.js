@@ -7,7 +7,7 @@
   if (window.OB_UI) return;
 
   const HOST_ID = 'ob-root';
-  const VERSION = '1.8.2';
+  const VERSION = '1.8.3';
 
   /* ----------------------------------------------------------------- bar CSS
      v1.7: ZeroScript-style composer status bar (light DOM, page-level styles —
@@ -440,12 +440,12 @@ svg{display:block;flex:none}
     });
   }
 
-  function toast(msg) {
+  function toast(msg, ms) {
     const t = refs.toast;
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+    toast._t = setTimeout(() => t.classList.remove('show'), ms || 1800);
   }
 
   async function copyText(text, okMsg = 'Copied') {
@@ -2001,8 +2001,13 @@ svg{display:block;flex:none}
     const st = r.state || {};
     if (st.status === 'blocked') {
       refs.otaHint.textContent = 'Auto-injection is blocked by the browser: open chrome://extensions → OrbitBridge → Details → enable “Allow user scripts” (or Developer mode), then tap Check now. Until then the bundled engine runs.';
+    } else if (st.status === 'server_stale') {
+      // v1.8.3: the VPS is the ONLY update source — say so instead of a silent "up to date".
+      refs.otaHint.textContent = st.reason || 'Your VPS serves an older extension copy. Update the server first, then Check again.';
     } else if (st.status === 'error') {
       refs.otaHint.textContent = 'Last check failed: ' + (st.reason || st.error || 'unknown');
+    } else if (st.status === 'current') {
+      refs.otaHint.textContent = `Up to date with your VPS (it serves extension v${st.version}). Newer releases reach the extension only after the server is updated.`;
     } else {
       refs.otaHint.textContent = '';
     }
@@ -2016,7 +2021,8 @@ svg{display:block;flex:none}
       const r = await sendBg({ type: 'CHECK_OTA' });
       if (!r) { toast('Could not reach the update service'); return; }
       if (r.status === 'updated') toast(r.registered ? `Updated to v${r.version} — reloading idle chat tabs` : `Downloaded v${r.version}`);
-      else if (r.status === 'current') toast(`Up to date (v${r.version || r.installed})`);
+      else if (r.status === 'current') toast(`Up to date with your VPS (v${r.version || r.installed})`);
+      else if (r.status === 'server_stale') toast('Your VPS is the update source and it is behind — ' + (r.error || 'update the server first'), 6500);
       else toast(r.error || 'Update check failed');
       refreshOta();
     });

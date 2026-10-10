@@ -21,7 +21,7 @@ const parallelTools = require('./tools/parallel_tools');
 const installer = require('./installer');
 const { getTerminalSession } = require('./tools/terminal_session');
 
-const VERSION = '1.8.2';
+const VERSION = '1.8.3';
 const STARTED_AT = new Date().toISOString();
 
 process.on('uncaughtException', (err) => console.error('[Server Error] Uncaught:', err));
@@ -502,7 +502,10 @@ const server = http.createServer(async (req, res) => {
           const buf = fs.readFileSync(path.join(OTA_EXT_DIR, name));
           return { name, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') };
         });
-        sendJson(res, 200, { success: true, ota: { version: mf.version, files, built: fs.statSync(path.join(OTA_EXT_DIR, 'manifest.json')).mtime.toISOString() } });
+        // v1.8.3: `server` = the server package version. The extension uses it to
+        // tell "up to date" apart from "your installer never refreshed the
+        // served extension copy" (old installers did not copy extension/).
+        sendJson(res, 200, { success: true, server: VERSION, ota: { version: mf.version, files, built: fs.statSync(path.join(OTA_EXT_DIR, 'manifest.json')).mtime.toISOString() } });
       } catch (e) {
         sendJson(res, 200, { success: false, error: 'OTA files not installed on this server — update the server package (bash ob-install.sh --update)' });
       }

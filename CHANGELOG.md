@@ -1,5 +1,31 @@
 # Changelog
 
+## OrbitBridge v1.8.3 (2026-10-10)
+
+Fixes the extension self-update (OTA) path: the Settings card could never show
+its status, and "no update found" could mean three different things without
+saying which.
+
+### Fixed — extension updates
+
+- **The "Extension updates" status line always said "Unavailable outside the
+  extension context".** The background's `OTA_STATUS` handler answered
+  asynchronously but returned `false`, which closes an MV3 message port before
+  the answer is sent. The installed/running version line was dead for everyone.
+  Now returns `true` (async response) and the line works.
+- **"Up to date" was ambiguous.** The extension can only update from its own
+  VPS, so when the check found nothing, you could not tell whether (a) the
+  server is current, (b) the server package is NEWER than the extension copy it
+  serves (old installers did not refresh `OB_HOME/extension`), or (c) the
+  served copy is older than the installed one. The check now distinguishes all
+  three: a stale server answers **server_stale** with the exact command to run
+  (`bash ob-install.sh --update`), shown as a toast and as a persistent hint.
+- The OTA manifest now reports the server package version (`server` field), so
+  the mismatch above is detectable at all.
+- "Check now" toasts now say "Up to date **with your VPS**" and the hint
+  explains that newer releases reach the extension only after the server is
+  updated.
+
 ## OrbitBridge v1.8.2 (2026-10-10)
 
 Bug-fix and polish release: the panel, the terminal, the Live feed and the engine.

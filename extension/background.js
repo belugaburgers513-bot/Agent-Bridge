@@ -217,10 +217,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     return true;
   }
   if (req && req.type === 'OTA_STATUS') {
+    // v1.8.3 FIX: this used to `return false` — in MV3 that closes the response
+    // channel before the async storage callback fires, so the Settings card
+    // always showed "Unavailable outside the extension context" and the user
+    // could never see installed/running versions. Return true (async response).
     chrome.storage.local.get(['obOtaState', 'obOtaBundle', 'obOtaAuto'], (r) => {
       sendResponse({ success: true, installed: EXT_VERSION, ota: (r.obOtaBundle && r.obOtaBundle.version) || null, state: r.obOtaState || null, auto: r.obOtaAuto !== false });
     });
-    return false;
+    return true;
   }
   if (req && req.type === 'OTA_RELOAD_TABS') {
     otaReloadIdleTabs().then((n) => sendResponse({ success: true, reloaded: n })).catch((e) => sendResponse({ success: false, error: e.message }));
@@ -521,6 +525,30 @@ async function otaReloadIdleTabs() {
   return n;
 }
 
+// Pure decision table for the update check (v1.8.3 — unit-tested).
+// The extension can ONLY update from its own VPS, so "no update detected" has
+// three very different causes that used to collapse into one silent
+// "Up to date": the server package genuinely current, the server package newer
+// than the extension copy it serves (old installer did not refresh
+// OB_HOME/extension), or the served copy older than the installed one.
+// man.server = the server package VERSION (v1.8.3+ servers send it).
+function otaDecision(man, extVersion) {
+  const remote = man.ota;
+  const serverPkg = man.server ? String(man.server) : null;
+  // server package NEWER than the extension copy it serves -> installer did not refresh OB_HOME/extension
+  if (serverPkg && cmpVer(serverPkg, remote.version) > 0) {
+    return { action: 'server_stale', reason: `Your server package is v${serverPkg} but it serves extension v${remote.version} — the installer did not refresh the extension copy. Run the install one-liner (or bash ob-install.sh --update) on your VPS, then tap Check again.`, server: serverPkg, served: remote.version };
+  }
+  if (cmpVer(remote.version, extVersion) > 0) {
+    return { action: 'download', served: remote.version };
+  }
+  if (cmpVer(remote.version, extVersion) < 0) {
+    // served extension OLDER than the installed one (e.g. a newer zip was side-loaded)
+    return { action: 'server_stale', reason: `Your VPS serves extension v${remote.version}, which is OLDER than your installed v${extVersion}. Update the server (re-run the install one-liner or bash ob-install.sh --update) to get the latest auto-update source.`, server: serverPkg, served: remote.version };
+  }
+  return { action: 'current', served: remote.version, server: serverPkg };
+}
+
 async function otaCheck(auto) {
   const man = await callApi({ method: 'GET', path: '/api/ota/manifest', timeoutMs: 30000 });
   if (!man || !man.success || !man.ota || !man.ota.version) {
@@ -529,9 +557,14 @@ async function otaCheck(auto) {
     return { status: 'error', error };
   }
   const remote = man.ota;
-  if (cmpVer(remote.version, EXT_VERSION) <= 0) {
+  const d = otaDecision(man, EXT_VERSION);
+  if (d.action === 'server_stale') {
+    await chrome.storage.local.set({ obOtaState: { status: 'server_stale', reason: d.reason, at: Date.now() } }).catch(() => {});
+    return { status: 'server_stale', error: d.reason, served: d.served, server: d.server, installed: EXT_VERSION };
+  }
+  if (d.action === 'current') {
     await chrome.storage.local.set({ obOtaState: { status: 'current', version: remote.version, at: Date.now() } }).catch(() => {});
-    return { status: 'current', version: remote.version, installed: EXT_VERSION };
+    return { status: 'current', version: remote.version, installed: EXT_VERSION, server: d.server };
   }
   const files = {};
   for (const f of remote.files || []) {
