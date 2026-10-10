@@ -7,7 +7,7 @@ on your own server: terminal commands, file management, git, web fetch and MCP â
 driven by the AI, streamed live to your phone, with a ZeroScript-style status
 bar docked to the chat composer.
 
-![version](https://img.shields.io/badge/version-1.8.3-blue) ![platform](https://img.shields.io/b/platform-VPS%20Ubuntu%20%2B%20Chromium%20Android-orange) ![node](https://img.shields.io/badge/node-%E2%89%A518-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![version](https://img.shields.io/badge/version-1.8.4-blue) ![platform](https://img.shields.io/b/platform-VPS%20Ubuntu%20%2B%20Chromium%20Android-orange) ![node](https://img.shields.io/badge/node-%E2%89%A518-green) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
 

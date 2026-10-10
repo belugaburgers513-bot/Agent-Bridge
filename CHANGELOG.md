@@ -1,5 +1,27 @@
 # Changelog
 
+## OrbitBridge v1.8.4 (2026-10-10)
+
+Makes "Check now" actually APPLY the update, and tells the truth in every
+outcome.
+
+### Fixed — extension updates
+
+- **"Check now" downloaded and registered the new version but nothing visibly
+  happened.** Tab reloads (the step that switches the running engine to the new
+  core) only ran on the silent 30-minute auto path — a manual check skipped
+  them, and its toast even claimed "reloading idle chat tabs" while reloading
+  nothing. Manual checks now apply the update the same way: idle chat tabs are
+  reloaded (tabs mid-run are skipped by the busy guard), and the toast reports
+  the real count ("Updated to vX — reloaded 2 chat tabs").
+- **A browser without user scripts produced a fake success.** When the browser
+  lacks the userScripts API, or refuses registration (Chrome's "Allow user
+  scripts" toggle is off — the default on Chrome 138+), the check ended as
+  "Downloaded vX" while nothing could ever install. It now answers **blocked
+  before downloading**, with the exact steps to fix (chrome://extensions →
+  OrbitBridge → Details → allow user scripts), as a toast and as a persistent
+  hint in the Extension updates card.
+
 ## OrbitBridge v1.8.3 (2026-10-10)
 
 Fixes the extension self-update (OTA) path: the Settings card could never show

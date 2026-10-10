@@ -566,6 +566,16 @@ async function otaCheck(auto) {
     await chrome.storage.local.set({ obOtaState: { status: 'current', version: remote.version, at: Date.now() } }).catch(() => {});
     return { status: 'current', version: remote.version, installed: EXT_VERSION, server: d.server };
   }
+  // v1.8.4: fail BEFORE downloading when the browser cannot run user scripts.
+  // The old flow downloaded, then tried to register, then still answered
+  // status 'updated' (registered: false) — the user saw "Downloaded vX" while
+  // nothing could ever install. An honest early 'blocked' with the fix beats
+  // a fake success.
+  if (!chrome.userScripts || typeof chrome.userScripts.register !== 'function') {
+    const reason = 'This browser cannot run user scripts — auto-update needs Chrome 120+ with “Allow user scripts” ON (chrome://extensions → OrbitBridge → Details). Side-load the new extension zip instead.';
+    await chrome.storage.local.set({ obOtaState: { status: 'blocked', reason, at: Date.now() } }).catch(() => {});
+    return { status: 'blocked', reason, installed: EXT_VERSION };
+  }
   const files = {};
   for (const f of remote.files || []) {
     if (!OTA_FILES.includes(f.name)) continue;
@@ -590,11 +600,24 @@ async function otaCheck(auto) {
   }
   await chrome.storage.local.set({ obOtaBundle: { version: remote.version, files, at: Date.now() } });
   const ens = await otaEnsureRegistered();
-  const out = { status: 'updated', version: remote.version, registered: ens.ok, installed: EXT_VERSION };
-  if (ens.ok && auto) {
-    try { out.reloaded = await otaReloadIdleTabs(); } catch (e) { /* ignore */ }
+  if (!ens.ok) {
+    // v1.8.4: registration refused (usually Chrome's "Allow user scripts"
+    // toggle is off). Report 'blocked' with the browser's own reason instead
+    // of pretending the update landed.
+    const reason = ens.reason === 'unsupported'
+      ? 'This browser cannot run user scripts (needs Chrome 120+).'
+      : (ens.reason || 'The browser refused the auto-injection.');
+    await chrome.storage.local.set({ obOtaState: { status: 'blocked', reason, at: Date.now() } }).catch(() => {});
+    return { status: 'blocked', reason, version: remote.version, installed: EXT_VERSION };
   }
-  return out;
+  // v1.8.4: apply the update on MANUAL checks too. The old code reloaded tabs
+  // only on the silent auto path (`ens.ok && auto`), so "Check now" downloaded
+  // + registered and then NOTHING visibly happened — the running engine stayed
+  // old until the user happened to reload the page by hand. Reload idle chat
+  // tabs in both paths; tabs mid-run answer OTA_BUSY and are skipped.
+  let reloaded = 0;
+  try { reloaded = await otaReloadIdleTabs(); } catch (e) { /* ignore */ }
+  return { status: 'updated', version: remote.version, registered: true, reloaded, installed: EXT_VERSION };
 }
 
 // Re-register the stored bundle after every worker restart (registrations are
