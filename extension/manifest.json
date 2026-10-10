@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OrbitBridge — VPS Agent",
-  "version": "1.8.3",
+  "version": "1.8.5",
   "description": "Your Ubuntu VPS inside AI chats: terminal, files (upload, download, zip), git, web fetch and MCP. Parallel tools, tools-per-message control, self-updating from your server, live activity tab, prompt queue, multi-VPS.",
   "permissions": ["storage", "scripting", "alarms", "tabs", "userScripts"],
   "host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],

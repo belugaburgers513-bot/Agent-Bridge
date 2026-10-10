@@ -1,6 +1,6 @@
 # Changelog
 
-## OrbitBridge v1.8.3 (2026-10-11)
+## OrbitBridge v1.8.5 (2026-10-11)
 
 Tool-call detection release: fixes "the AI called the tool but OrbitBridge didn't see it".
 
@@ -15,6 +15,54 @@ Tool-call detection release: fixes "the AI called the tool but OrbitBridge didn'
   "streaming" classes and "think" wrapper classes no longer block calls; a frozen message
   runs after 12s even if the site still shows a Stop button.
 - **Repeated identical reply** in a later turn is no longer swallowed by dedup.
+
+## OrbitBridge v1.8.4 (2026-10-10)
+
+Makes "Check now" actually APPLY the update, and tells the truth in every
+outcome.
+
+### Fixed — extension updates
+
+- **"Check now" downloaded and registered the new version but nothing visibly
+  happened.** Tab reloads (the step that switches the running engine to the new
+  core) only ran on the silent 30-minute auto path — a manual check skipped
+  them, and its toast even claimed "reloading idle chat tabs" while reloading
+  nothing. Manual checks now apply the update the same way: idle chat tabs are
+  reloaded (tabs mid-run are skipped by the busy guard), and the toast reports
+  the real count ("Updated to vX — reloaded 2 chat tabs").
+- **A browser without user scripts produced a fake success.** When the browser
+  lacks the userScripts API, or refuses registration (Chrome's "Allow user
+  scripts" toggle is off — the default on Chrome 138+), the check ended as
+  "Downloaded vX" while nothing could ever install. It now answers **blocked
+  before downloading**, with the exact steps to fix (chrome://extensions →
+  OrbitBridge → Details → allow user scripts), as a toast and as a persistent
+  hint in the Extension updates card.
+
+## OrbitBridge v1.8.3 (2026-10-10)
+
+Fixes the extension self-update (OTA) path: the Settings card could never show
+its status, and "no update found" could mean three different things without
+saying which.
+
+### Fixed — extension updates
+
+- **The "Extension updates" status line always said "Unavailable outside the
+  extension context".** The background's `OTA_STATUS` handler answered
+  asynchronously but returned `false`, which closes an MV3 message port before
+  the answer is sent. The installed/running version line was dead for everyone.
+  Now returns `true` (async response) and the line works.
+- **"Up to date" was ambiguous.** The extension can only update from its own
+  VPS, so when the check found nothing, you could not tell whether (a) the
+  server is current, (b) the server package is NEWER than the extension copy it
+  serves (old installers did not refresh `OB_HOME/extension`), or (c) the
+  served copy is older than the installed one. The check now distinguishes all
+  three: a stale server answers **server_stale** with the exact command to run
+  (`bash ob-install.sh --update`), shown as a toast and as a persistent hint.
+- The OTA manifest now reports the server package version (`server` field), so
+  the mismatch above is detectable at all.
+- "Check now" toasts now say "Up to date **with your VPS**" and the hint
+  explains that newer releases reach the extension only after the server is
+  updated.
 
 ## OrbitBridge v1.8.2 (2026-10-10)
 

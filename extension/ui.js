@@ -7,7 +7,7 @@
   if (window.OB_UI) return;
 
   const HOST_ID = 'ob-root';
-  const VERSION = '1.8.3';
+  const VERSION = '1.8.5';
 
   /* ----------------------------------------------------------------- bar CSS
      v1.7: ZeroScript-style composer status bar (light DOM, page-level styles —
@@ -440,12 +440,12 @@ svg{display:block;flex:none}
     });
   }
 
-  function toast(msg) {
+  function toast(msg, ms) {
     const t = refs.toast;
     t.textContent = msg;
     t.classList.add('show');
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+    toast._t = setTimeout(() => t.classList.remove('show'), ms || 1800);
   }
 
   async function copyText(text, okMsg = 'Copied') {
@@ -2000,9 +2000,15 @@ svg{display:block;flex:none}
     refs.otaLine.textContent = `Installed v${r.installed}` + (r.ota && r.ota !== r.installed ? ` · running auto-updated v${r.ota}` : '');
     const st = r.state || {};
     if (st.status === 'blocked') {
-      refs.otaHint.textContent = 'Auto-injection is blocked by the browser: open chrome://extensions → OrbitBridge → Details → enable “Allow user scripts” (or Developer mode), then tap Check now. Until then the bundled engine runs.';
+      // v1.8.4: prefer the background's own reason (it carries the exact fix), fall back to the classic hint.
+      refs.otaHint.textContent = st.reason || 'Auto-injection is blocked by the browser: open chrome://extensions → OrbitBridge → Details → enable “Allow user scripts” (or Developer mode), then tap Check now. Until then the bundled engine runs.';
+    } else if (st.status === 'server_stale') {
+      // v1.8.3: the VPS is the ONLY update source — say so instead of a silent "up to date".
+      refs.otaHint.textContent = st.reason || 'Your VPS serves an older extension copy. Update the server first, then Check again.';
     } else if (st.status === 'error') {
       refs.otaHint.textContent = 'Last check failed: ' + (st.reason || st.error || 'unknown');
+    } else if (st.status === 'current') {
+      refs.otaHint.textContent = `Up to date with your VPS (it serves extension v${st.version}). Newer releases reach the extension only after the server is updated.`;
     } else {
       refs.otaHint.textContent = '';
     }
@@ -2015,9 +2021,17 @@ svg{display:block;flex:none}
       toast('Checking for updates…');
       const r = await sendBg({ type: 'CHECK_OTA' });
       if (!r) { toast('Could not reach the update service'); return; }
-      if (r.status === 'updated') toast(r.registered ? `Updated to v${r.version} — reloading idle chat tabs` : `Downloaded v${r.version}`);
-      else if (r.status === 'current') toast(`Up to date (v${r.version || r.installed})`);
-      else toast(r.error || 'Update check failed');
+      if (r.status === 'updated') {
+        // v1.8.4: honest outcomes — the update now applies on manual checks too.
+        toast(r.reloaded ? `Updated to v${r.version} — reloaded ${r.reloaded} chat tab${r.reloaded > 1 ? 's' : ''}` : `Updated to v${r.version} — reload your chat tab to switch to it`, 4500);
+      } else if (r.status === 'current') {
+        toast(`Up to date with your VPS (v${r.version || r.installed})`);
+      } else if (r.status === 'server_stale') {
+        toast('Your VPS is the update source and it is behind — ' + (r.error || 'update the server first'), 6500);
+      } else if (r.status === 'blocked') {
+        // v1.8.4: the browser refuses user scripts — say exactly what to flip.
+        toast('Cannot auto-install: ' + r.reason, 7500);
+      } else toast(r.error || 'Update check failed');
       refreshOta();
     });
     refs.otaAutoToggle.addEventListener('click', async () => {

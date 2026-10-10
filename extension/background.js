@@ -217,10 +217,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     return true;
   }
   if (req && req.type === 'OTA_STATUS') {
+    // v1.8.3 FIX: this used to `return false` — in MV3 that closes the response
+    // channel before the async storage callback fires, so the Settings card
+    // always showed "Unavailable outside the extension context" and the user
+    // could never see installed/running versions. Return true (async response).
     chrome.storage.local.get(['obOtaState', 'obOtaBundle', 'obOtaAuto'], (r) => {
       sendResponse({ success: true, installed: EXT_VERSION, ota: (r.obOtaBundle && r.obOtaBundle.version) || null, state: r.obOtaState || null, auto: r.obOtaAuto !== false });
     });
-    return false;
+    return true;
   }
   if (req && req.type === 'OTA_RELOAD_TABS') {
     otaReloadIdleTabs().then((n) => sendResponse({ success: true, reloaded: n })).catch((e) => sendResponse({ success: false, error: e.message }));
@@ -521,6 +525,30 @@ async function otaReloadIdleTabs() {
   return n;
 }
 
+// Pure decision table for the update check (v1.8.3 — unit-tested).
+// The extension can ONLY update from its own VPS, so "no update detected" has
+// three very different causes that used to collapse into one silent
+// "Up to date": the server package genuinely current, the server package newer
+// than the extension copy it serves (old installer did not refresh
+// OB_HOME/extension), or the served copy older than the installed one.
+// man.server = the server package VERSION (v1.8.3+ servers send it).
+function otaDecision(man, extVersion) {
+  const remote = man.ota;
+  const serverPkg = man.server ? String(man.server) : null;
+  // server package NEWER than the extension copy it serves -> installer did not refresh OB_HOME/extension
+  if (serverPkg && cmpVer(serverPkg, remote.version) > 0) {
+    return { action: 'server_stale', reason: `Your server package is v${serverPkg} but it serves extension v${remote.version} — the installer did not refresh the extension copy. Run the install one-liner (or bash ob-install.sh --update) on your VPS, then tap Check again.`, server: serverPkg, served: remote.version };
+  }
+  if (cmpVer(remote.version, extVersion) > 0) {
+    return { action: 'download', served: remote.version };
+  }
+  if (cmpVer(remote.version, extVersion) < 0) {
+    // served extension OLDER than the installed one (e.g. a newer zip was side-loaded)
+    return { action: 'server_stale', reason: `Your VPS serves extension v${remote.version}, which is OLDER than your installed v${extVersion}. Update the server (re-run the install one-liner or bash ob-install.sh --update) to get the latest auto-update source.`, server: serverPkg, served: remote.version };
+  }
+  return { action: 'current', served: remote.version, server: serverPkg };
+}
+
 async function otaCheck(auto) {
   const man = await callApi({ method: 'GET', path: '/api/ota/manifest', timeoutMs: 30000 });
   if (!man || !man.success || !man.ota || !man.ota.version) {
@@ -529,9 +557,24 @@ async function otaCheck(auto) {
     return { status: 'error', error };
   }
   const remote = man.ota;
-  if (cmpVer(remote.version, EXT_VERSION) <= 0) {
+  const d = otaDecision(man, EXT_VERSION);
+  if (d.action === 'server_stale') {
+    await chrome.storage.local.set({ obOtaState: { status: 'server_stale', reason: d.reason, at: Date.now() } }).catch(() => {});
+    return { status: 'server_stale', error: d.reason, served: d.served, server: d.server, installed: EXT_VERSION };
+  }
+  if (d.action === 'current') {
     await chrome.storage.local.set({ obOtaState: { status: 'current', version: remote.version, at: Date.now() } }).catch(() => {});
-    return { status: 'current', version: remote.version, installed: EXT_VERSION };
+    return { status: 'current', version: remote.version, installed: EXT_VERSION, server: d.server };
+  }
+  // v1.8.4: fail BEFORE downloading when the browser cannot run user scripts.
+  // The old flow downloaded, then tried to register, then still answered
+  // status 'updated' (registered: false) — the user saw "Downloaded vX" while
+  // nothing could ever install. An honest early 'blocked' with the fix beats
+  // a fake success.
+  if (!chrome.userScripts || typeof chrome.userScripts.register !== 'function') {
+    const reason = 'This browser cannot run user scripts — auto-update needs Chrome 120+ with “Allow user scripts” ON (chrome://extensions → OrbitBridge → Details). Side-load the new extension zip instead.';
+    await chrome.storage.local.set({ obOtaState: { status: 'blocked', reason, at: Date.now() } }).catch(() => {});
+    return { status: 'blocked', reason, installed: EXT_VERSION };
   }
   const files = {};
   for (const f of remote.files || []) {
@@ -557,11 +600,24 @@ async function otaCheck(auto) {
   }
   await chrome.storage.local.set({ obOtaBundle: { version: remote.version, files, at: Date.now() } });
   const ens = await otaEnsureRegistered();
-  const out = { status: 'updated', version: remote.version, registered: ens.ok, installed: EXT_VERSION };
-  if (ens.ok && auto) {
-    try { out.reloaded = await otaReloadIdleTabs(); } catch (e) { /* ignore */ }
+  if (!ens.ok) {
+    // v1.8.4: registration refused (usually Chrome's "Allow user scripts"
+    // toggle is off). Report 'blocked' with the browser's own reason instead
+    // of pretending the update landed.
+    const reason = ens.reason === 'unsupported'
+      ? 'This browser cannot run user scripts (needs Chrome 120+).'
+      : (ens.reason || 'The browser refused the auto-injection.');
+    await chrome.storage.local.set({ obOtaState: { status: 'blocked', reason, at: Date.now() } }).catch(() => {});
+    return { status: 'blocked', reason, version: remote.version, installed: EXT_VERSION };
   }
-  return out;
+  // v1.8.4: apply the update on MANUAL checks too. The old code reloaded tabs
+  // only on the silent auto path (`ens.ok && auto`), so "Check now" downloaded
+  // + registered and then NOTHING visibly happened — the running engine stayed
+  // old until the user happened to reload the page by hand. Reload idle chat
+  // tabs in both paths; tabs mid-run answer OTA_BUSY and are skipped.
+  let reloaded = 0;
+  try { reloaded = await otaReloadIdleTabs(); } catch (e) { /* ignore */ }
+  return { status: 'updated', version: remote.version, registered: true, reloaded, installed: EXT_VERSION };
 }
 
 // Re-register the stored bundle after every worker restart (registrations are
